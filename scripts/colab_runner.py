@@ -516,8 +516,12 @@ def run_environment_check(data_dir=None, save_json=True):
 
 def main():
     parser = argparse.ArgumentParser(description="Colab Runner & Environment Check")
-    parser.add_argument("--mode", choices=["check", "exp"], default="check", help="Execution mode (check or exp)")
+    parser.add_argument("--mode", choices=["check", "blocking", "exp"], default="check", help="Execution mode (check, blocking, or exp)")
     parser.add_argument("--data-dir", type=str, default=None, help="Custom dataset directory path")
+    parser.add_argument("--sample-size", type=int, default=1000, help="S1 sample size for evaluation")
+    parser.add_argument("--target-sample-size", type=int, default=100000, help="Target S2/S3 sample size per source")
+    parser.add_argument("--top-k", type=int, default=50, help="Candidate top-K limit per query")
+    parser.add_argument("--max-token-freq", type=int, default=5000, help="Max token frequency limit")
     parser.add_argument("--config", type=str, default=None, help="Path to experiment config YAML/JSON")
     parser.add_argument("--experiment-id", type=str, default=None, help="Unique experiment ID")
     parser.add_argument("--seed", type=int, default=SEED, help="Random seed")
@@ -526,9 +530,23 @@ def main():
     
     if args.mode == "check":
         run_environment_check(data_dir=args.data_dir, save_json=True)
+    elif args.mode == "blocking":
+        from scripts.run_blocking_eval import run_blocking_experiment
+        exp_id = args.experiment_id if args.experiment_id else "EXP-0002_blocking_eval"
+        run_blocking_experiment(
+            data_dir=args.data_dir,
+            s1_sample_size=args.sample_size,
+            target_sample_size=args.target_sample_size,
+            top_k=args.top_k,
+            max_token_freq=args.max_token_freq,
+            experiment_id=exp_id,
+            seed=args.seed,
+            save_json=True
+        )
     else:
         print(f"Experiment execution mode requested: config={args.config}")
         print("Note: Full pipeline execution will be configured and launched per specific experiment plan.")
+
 
 
 if __name__ == "__main__":
