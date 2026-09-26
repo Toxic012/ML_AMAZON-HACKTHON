@@ -1,0 +1,19 @@
+{
+  "experiment_id": "PHASE_3_pairwise_matching",
+  "phase": 3,
+  "title": "Pairwise Feature Engineering & Supervised Matching with Official Macro F0.5 Optimization",
+  "timestamp": "2026-09-26T14:41:41.241212",
+  "git_commit": "d40cada3377fd794f30bca57557f55089b7dbcc0",
+  "model_type": "LightGBM (LGBMClassifier)",
+  "feature_count": 25,
+  "decision_threshold": 0.83,
+  "validation_metrics": {
+    "macro_f05": 0.981139,
+    "macro_precision": 0.993159,
+    "macro_recall": 0.963774,
+    "global_pairwise_precision": 0.991379,
+    "global_pairwise_recall": 0.961003,
+    "global_pairwise_f05": 0.985151,
+    "singleton_accuracy": 1.0
+  }
+}
