@@ -51,10 +51,13 @@ def evaluate_blocking_strategy(
     s2_index,
     s3_index,
     gt_map: Dict[str, Set[str]],
+    indexed_target_ids: Optional[Set[str]] = None,
     top_k: int = 50
 ) -> dict:
     """
     Evaluates a candidate generation strategy against ground truth.
+    Strictly asserts that recall is measured only over ground truth pairs whose
+    target entity was present in the indexed retrieval universe.
     """
     t0 = time.perf_counter()
     mem_start = get_process_memory_mb()
@@ -75,7 +78,13 @@ def evaluate_blocking_strategy(
     
     for s1 in s1_records:
         s1_id = s1["entity_id"]
-        true_matches = gt_map.get(s1_id, set())
+        raw_matches = gt_map.get(s1_id, set())
+        
+        # Filter to only targets that were actually indexed in the retrieval universe
+        if indexed_target_ids is not None:
+            true_matches = {m for m in raw_matches if m in indexed_target_ids}
+        else:
+            true_matches = raw_matches
         
         # Generate candidates
         cands = strategy_fn(s1, s2_index, s3_index, top_k=top_k)

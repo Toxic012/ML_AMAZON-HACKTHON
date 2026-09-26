@@ -1,57 +1,67 @@
 {
   "experiment_id": "EXP-0002_blocking_eval",
-  "timestamp": "2026-09-26T13:50:28.767597",
-  "git_commit": "4e60c856e553ab469ed9af6106ada95b0ca95f99",
+  "evaluation_methodology": "corrected_guaranteed_positive_universe",
+  "timestamp": "2026-09-26T14:06:55.565927",
+  "git_commit": "0a62776bdd36f5639f05da616eb000f7bcea2b0d",
   "configuration": {
-    "s1_sample_size": 1000,
-    "target_sample_size": 50000,
+    "s1_sample_size": 500,
+    "target_sample_size_per_source": 20000,
     "top_k": 50,
     "max_token_freq": 5000,
     "seed": 42
   },
-  "target_index_stats": {
-    "s2_records_indexed": 50000,
-    "s3_records_indexed": 50000,
-    "index_build_time_sec": 2.71,
-    "memory_post_index_mb": 95.78
+  "retrieval_universe": {
+    "s1_queries_evaluated": 500,
+    "s1_entities_with_gt": 469,
+    "total_gt_pairs_evaluated": 1778,
+    "s2_guaranteed_positives": 855,
+    "s2_negative_distractors": 19145,
+    "s2_total_universe": 20000,
+    "s3_guaranteed_positives": 923,
+    "s3_negative_distractors": 19077,
+    "s3_total_universe": 20000,
+    "total_target_universe": 40000,
+    "s2_index_time_sec": 20.75,
+    "s3_index_time_sec": 21.13,
+    "memory_post_index_mb": 62.57
   },
   "strategy_results": {
     "exact_name": {
-      "true_pair_recall": 0.001706,
-      "s2_recall": 0.001172,
-      "s3_recall": 0.002209,
-      "s1_entity_coverage": 0.006342,
-      "total_gt_pairs": 3517,
-      "recovered_gt_pairs": 6,
+      "true_pair_recall": 0.207537,
+      "s2_recall": 0.195322,
+      "s3_recall": 0.218852,
+      "s1_entity_coverage": 0.556503,
+      "total_gt_pairs": 1778,
+      "recovered_gt_pairs": 369,
       "candidate_volume": {
-        "total_candidate_pairs": 97,
-        "mean_per_s1": 0.1,
-        "median_per_s1": 0.0,
-        "p90_per_s1": 0.0,
-        "p95_per_s1": 1.0,
-        "p99_per_s1": 2.0,
-        "max_per_s1": 4,
+        "total_candidate_pairs": 395,
+        "mean_per_s1": 0.79,
+        "median_per_s1": 1.0,
+        "p90_per_s1": 2.0,
+        "p95_per_s1": 2.0,
+        "p99_per_s1": 4.0,
+        "max_per_s1": 6,
         "min_per_s1": 0
       },
       "performance": {
-        "query_time_sec": 0.0061,
-        "queries_per_sec": 163934.43,
-        "s1_queries_evaluated": 1000,
-        "memory_rss_start_mb": 95.27,
-        "memory_rss_end_mb": 95.28,
+        "query_time_sec": 0.0026,
+        "queries_per_sec": 192307.69,
+        "s1_queries_evaluated": 500,
+        "memory_rss_start_mb": 62.09,
+        "memory_rss_end_mb": 62.1,
         "memory_delta_mb": 0.01
       }
     },
     "rare_tokens": {
-      "true_pair_recall": 0.007677,
-      "s2_recall": 0.005275,
-      "s3_recall": 0.009939,
-      "s1_entity_coverage": 0.027484,
-      "total_gt_pairs": 3517,
-      "recovered_gt_pairs": 27,
+      "true_pair_recall": 0.785152,
+      "s2_recall": 0.782456,
+      "s3_recall": 0.787649,
+      "s1_entity_coverage": 0.946695,
+      "total_gt_pairs": 1778,
+      "recovered_gt_pairs": 1396,
       "candidate_volume": {
-        "total_candidate_pairs": 41924,
-        "mean_per_s1": 41.92,
+        "total_candidate_pairs": 18989,
+        "mean_per_s1": 37.98,
         "median_per_s1": 50.0,
         "p90_per_s1": 50.0,
         "p95_per_s1": 50.0,
@@ -60,25 +70,25 @@
         "min_per_s1": 0
       },
       "performance": {
-        "query_time_sec": 0.262,
-        "queries_per_sec": 3816.79,
-        "s1_queries_evaluated": 1000,
-        "memory_rss_start_mb": 95.54,
-        "memory_rss_end_mb": 95.78,
-        "memory_delta_mb": 0.24
+        "query_time_sec": 0.0669,
+        "queries_per_sec": 7473.84,
+        "s1_queries_evaluated": 500,
+        "memory_rss_start_mb": 62.36,
+        "memory_rss_end_mb": 62.51,
+        "memory_delta_mb": 0.15
       }
     },
     "disjunctive_union": {
-      "true_pair_recall": 0.007677,
-      "s2_recall": 0.005275,
-      "s3_recall": 0.009939,
-      "s1_entity_coverage": 0.027484,
-      "total_gt_pairs": 3517,
-      "recovered_gt_pairs": 27,
+      "true_pair_recall": 0.792463,
+      "s2_recall": 0.791813,
+      "s3_recall": 0.793066,
+      "s1_entity_coverage": 0.96162,
+      "total_gt_pairs": 1778,
+      "recovered_gt_pairs": 1409,
       "candidate_volume": {
-        "total_candidate_pairs": 41812,
-        "mean_per_s1": 41.81,
-        "median_per_s1": 50.0,
+        "total_candidate_pairs": 18645,
+        "mean_per_s1": 37.29,
+        "median_per_s1": 48.0,
         "p90_per_s1": 50.0,
         "p95_per_s1": 50.0,
         "p99_per_s1": 50.0,
@@ -86,38 +96,38 @@
         "min_per_s1": 0
       },
       "performance": {
-        "query_time_sec": 0.2511,
-        "queries_per_sec": 3982.48,
-        "s1_queries_evaluated": 1000,
-        "memory_rss_start_mb": 95.78,
-        "memory_rss_end_mb": 95.78,
+        "query_time_sec": 0.0647,
+        "queries_per_sec": 7727.98,
+        "s1_queries_evaluated": 500,
+        "memory_rss_start_mb": 62.51,
+        "memory_rss_end_mb": 62.51,
         "memory_delta_mb": 0.0
       }
     },
     "composite_union": {
-      "true_pair_recall": 0.007108,
-      "s2_recall": 0.005275,
-      "s3_recall": 0.008835,
-      "s1_entity_coverage": 0.02537,
-      "total_gt_pairs": 3517,
-      "recovered_gt_pairs": 25,
+      "true_pair_recall": 0.75703,
+      "s2_recall": 0.761404,
+      "s3_recall": 0.752979,
+      "s1_entity_coverage": 0.938166,
+      "total_gt_pairs": 1778,
+      "recovered_gt_pairs": 1346,
       "candidate_volume": {
-        "total_candidate_pairs": 49359,
-        "mean_per_s1": 49.36,
-        "median_per_s1": 50.0,
+        "total_candidate_pairs": 23343,
+        "mean_per_s1": 46.69,
+        "median_per_s1": 48.0,
         "p90_per_s1": 50.0,
         "p95_per_s1": 50.0,
         "p99_per_s1": 50.0,
         "max_per_s1": 50,
-        "min_per_s1": 5
+        "min_per_s1": 11
       },
       "performance": {
-        "query_time_sec": 0.3423,
-        "queries_per_sec": 2921.41,
-        "s1_queries_evaluated": 1000,
-        "memory_rss_start_mb": 95.78,
-        "memory_rss_end_mb": 95.78,
-        "memory_delta_mb": 0.0
+        "query_time_sec": 0.0848,
+        "queries_per_sec": 5896.23,
+        "s1_queries_evaluated": 500,
+        "memory_rss_start_mb": 62.51,
+        "memory_rss_end_mb": 62.57,
+        "memory_delta_mb": 0.06
       }
     }
   }
