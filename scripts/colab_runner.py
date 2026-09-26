@@ -29,11 +29,11 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 try:
-    from src.config import get_dataset_dir, BASE_DIR, EXPERIMENTS_DIR, SEED
+    from src.config import get_dataset_dir, resolve_dataset_paths, BASE_DIR, EXPERIMENTS_DIR, SEED
     from src.normalization import normalize_record, normalize_text, tokenize
     from src.features import compute_features
 except ImportError:
-    from code.business_entity_resolution.src.config import get_dataset_dir, BASE_DIR, EXPERIMENTS_DIR, SEED
+    from code.business_entity_resolution.src.config import get_dataset_dir, resolve_dataset_paths, BASE_DIR, EXPERIMENTS_DIR, SEED
     from code.business_entity_resolution.src.normalization import normalize_record, normalize_text, tokenize
     from code.business_entity_resolution.src.features import compute_features
 
@@ -347,12 +347,13 @@ def run_tiny_benchmark(data_dir):
 
 
 
-def verify_dataset(data_dir):
-    data_path = Path(data_dir)
-    path_exists = data_path.exists()
+def verify_dataset(data_dir=None):
+    resolved = resolve_dataset_paths(data_dir)
+    data_path = resolved.get("data_dir")
+    path_exists = data_path.exists() if data_path else False
     
     results = {
-        "data_dir": str(data_path),
+        "data_dir": str(data_path) if data_path else "",
         "dataset_path_status": "DATASET_PATH_FOUND" if path_exists else "DATASET_PATH_NOT_FOUND",
         "exists": path_exists,
         "files": {},
@@ -360,28 +361,24 @@ def verify_dataset(data_dir):
         "total_size_mb": 0.0
     }
     
-    required_files = {
-        "train_source1": data_path / "train" / "train_source1.tsv",
-        "train_source2": data_path / "train" / "train_source2.tsv",
-        "train_source3": data_path / "train" / "train_source3.tsv",
-        "train_ground_truth": data_path / "train" / "train_ground_truth.tsv",
-        "test_source1": data_path / "test" / "test_source1.tsv",
-        "test_source2": data_path / "test" / "test_source2.tsv",
-        "test_source3": data_path / "test" / "test_source3.tsv",
-    }
+    file_keys = [
+        "train_source1", "train_source2", "train_source3", "train_ground_truth",
+        "test_source1", "test_source2", "test_source3"
+    ]
     
     all_present = True
     total_bytes = 0
     
-    for key, path in required_files.items():
-        exists = path.exists()
+    for key in file_keys:
+        path = resolved.get(key)
+        exists = path is not None and path.exists()
         size_bytes = path.stat().st_size if exists else 0
         total_bytes += size_bytes
         if not exists:
             all_present = False
             
         file_info = {
-            "path": str(path),
+            "path": str(path) if path else "NOT_RESOLVED",
             "exists": exists,
             "size_mb": round(size_bytes / (1024 ** 2), 2),
             "header": None,
@@ -393,7 +390,8 @@ def verify_dataset(data_dir):
             try:
                 with open(path, "r", encoding="utf-8") as f:
                     header_line = f.readline().strip()
-                    file_info["header"] = header_line.split("\t")
+                    delimiter = "\t" if path.suffix.lower() == ".tsv" else ","
+                    file_info["header"] = header_line.split(delimiter)
                 lines = count_lines_fast(path)
                 file_info["line_count"] = lines
                 file_info["approx_rows"] = max(0, lines - 1)  # minus header

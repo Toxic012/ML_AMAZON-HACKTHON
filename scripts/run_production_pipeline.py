@@ -36,14 +36,14 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 try:
-    from src.config import get_dataset_dir, EXPERIMENTS_DIR, BASE_DIR
+    from src.config import get_dataset_dir, resolve_dataset_paths, print_dataset_diagnostics, EXPERIMENTS_DIR, BASE_DIR
     from src.normalization import normalize_record
     from src.blocking.token_index import InvertedTokenIndex
     from src.blocking.strategies import block_hybrid_full_union
     from src.features import compute_pairwise_features
     from src.matching.matcher import EntityMatcher
 except ImportError:
-    from code.business_entity_resolution.src.config import get_dataset_dir, EXPERIMENTS_DIR, BASE_DIR
+    from code.business_entity_resolution.src.config import get_dataset_dir, resolve_dataset_paths, print_dataset_diagnostics, EXPERIMENTS_DIR, BASE_DIR
     from code.business_entity_resolution.src.normalization import normalize_record
     from code.business_entity_resolution.src.blocking.token_index import InvertedTokenIndex
     from code.business_entity_resolution.src.blocking.strategies import block_hybrid_full_union
@@ -105,17 +105,26 @@ def run_production_pipeline(
     
     t_pipeline_start = time.time()
     
-    # 1. Resolve Dataset Paths
-    resolved_data_dir = get_dataset_dir(data_dir)
-    test_path = resolved_data_dir / "test" if (resolved_data_dir / "test").exists() else resolved_data_dir
+    # 1. Resolve Dataset Paths with Diagnostics
+    resolved_paths = resolve_dataset_paths(data_dir)
+    print_dataset_diagnostics(resolved_paths)
     
-    s1_file = test_path / "test_source1.tsv"
-    s2_file = test_path / "test_source2.tsv"
-    s3_file = test_path / "test_source3.tsv"
+    s1_file = resolved_paths.get("test_source1")
+    s2_file = resolved_paths.get("test_source2")
+    s3_file = resolved_paths.get("test_source3")
     
-    assert s1_file.exists(), f"Source 1 test file missing: {s1_file}"
-    assert s2_file.exists(), f"Source 2 test file missing: {s2_file}"
-    assert s3_file.exists(), f"Source 3 test file missing: {s3_file}"
+    assert s1_file and s1_file.exists(), (
+        f"[FATAL CONFIG ERROR] Test Source 1 file could not be resolved in {resolved_paths['data_dir']}!\n"
+        f"Searched for filenames: ['test_source1.tsv', 'source1.tsv', 'test_source1.csv', 'source1.csv']"
+    )
+    assert s2_file and s2_file.exists(), (
+        f"[FATAL CONFIG ERROR] Test Source 2 file could not be resolved in {resolved_paths['data_dir']}!\n"
+        f"Searched for filenames: ['test_source2.tsv', 'source2.tsv', 'test_source2.csv', 'source2.csv']"
+    )
+    assert s3_file and s3_file.exists(), (
+        f"[FATAL CONFIG ERROR] Test Source 3 file could not be resolved in {resolved_paths['data_dir']}!\n"
+        f"Searched for filenames: ['test_source3.tsv', 'source3.tsv', 'test_source3.csv', 'source3.csv']"
+    )
     
     # 2. Load Trained Matcher Model
     if model_path is None:
@@ -278,12 +287,12 @@ def run_production_pipeline(
     val_script = REPO_ROOT / "student_resource" / "utils" / "validate_submission.py"
     validator_passed = False
     
-    if val_script.exists():
+    if val_script.exists() and s1_file is not None:
         res = subprocess.run([
             sys.executable, str(val_script),
             "--matching", str(matching_tsv),
             "--candidate", str(candidate_tsv),
-            "--test-dir", str(test_path)
+            "--test-dir", str(s1_file.parent)
         ], capture_output=True, text=True)
         
         print(f"    Validator Return Code: {res.returncode}")
