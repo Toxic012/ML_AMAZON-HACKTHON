@@ -515,16 +515,19 @@ def run_environment_check(data_dir=None, save_json=True):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Colab Runner & Environment Check")
-    parser.add_argument("--mode", choices=["check", "blocking", "exp"], default="check", help="Execution mode (check, blocking, or exp)")
+    parser = argparse.ArgumentParser(description="Colab Runner & Full Production Pipeline")
+    parser.add_argument("--mode", choices=["check", "blocking", "matching", "full_pipeline", "exp"], default="check", help="Execution mode")
     parser.add_argument("--data-dir", type=str, default=None, help="Custom dataset directory path")
     parser.add_argument("--sample-size", type=int, default=1000, help="S1 sample size for evaluation")
-    parser.add_argument("--target-sample-size", type=int, default=100000, help="Target S2/S3 sample size per source")
+    parser.add_argument("--target-sample-size", type=int, default=50000, help="Target S2/S3 sample size per source")
     parser.add_argument("--top-k", type=int, default=50, help="Candidate top-K limit per query")
+    parser.add_argument("--threshold", type=float, default=0.83, help="Decision threshold")
+    parser.add_argument("--batch-size", type=int, default=2000, help="Batch size for S1 processing")
     parser.add_argument("--max-token-freq", type=int, default=5000, help="Max token frequency limit")
     parser.add_argument("--config", type=str, default=None, help="Path to experiment config YAML/JSON")
     parser.add_argument("--experiment-id", type=str, default=None, help="Unique experiment ID")
     parser.add_argument("--seed", type=int, default=SEED, help="Random seed")
+    parser.add_argument("--no-resume", action="store_true", help="Do not resume checkpoint")
     
     args = parser.parse_args()
     
@@ -532,7 +535,7 @@ def main():
         run_environment_check(data_dir=args.data_dir, save_json=True)
     elif args.mode == "blocking":
         from scripts.run_blocking_eval import run_blocking_experiment
-        exp_id = args.experiment_id if args.experiment_id else "EXP-0002_blocking_eval"
+        exp_id = args.experiment_id if args.experiment_id else "EXP-0003_blocking_char_address"
         run_blocking_experiment(
             data_dir=args.data_dir,
             s1_sample_size=args.sample_size,
@@ -543,9 +546,29 @@ def main():
             seed=args.seed,
             save_json=True
         )
+    elif args.mode == "matching":
+        from scripts.train_and_evaluate_matching import run_phase_3_pipeline
+        exp_id = args.experiment_id if args.experiment_id else "PHASE_3_pairwise_matching"
+        run_phase_3_pipeline(
+            data_dir=args.data_dir,
+            s1_sample_size=args.sample_size,
+            target_sample_size=args.target_sample_size,
+            top_k=args.top_k,
+            seed=args.seed,
+            experiment_id=exp_id
+        )
+    elif args.mode == "full_pipeline":
+        from scripts.run_production_pipeline import run_production_pipeline
+        run_production_pipeline(
+            data_dir=args.data_dir,
+            top_k=args.top_k,
+            threshold=args.threshold,
+            batch_size=args.batch_size,
+            resume=not args.no_resume
+        )
     else:
         print(f"Experiment execution mode requested: config={args.config}")
-        print("Note: Full pipeline execution will be configured and launched per specific experiment plan.")
+
 
 
 
