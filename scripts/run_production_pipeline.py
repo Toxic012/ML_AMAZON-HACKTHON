@@ -55,7 +55,11 @@ try:
     )
     from src.normalization import normalize_record, normalize_text
     from src.blocking.token_index import InvertedTokenIndex
-    from src.blocking.strategies import block_hybrid_single_source
+    from src.blocking.strategies import (
+        block_hybrid_single_source,
+        extract_source_tiers,
+        merge_strategy_e_tiers
+    )
     from src.features import compute_pairwise_features
     from src.matching.matcher import EntityMatcher
 except ImportError:
@@ -160,24 +164,24 @@ def process_single_source_phase(
     4. Deletes target index & store, triggers garbage collection, measures memory drop.
     Returns (matches_tsv_path, candidates_tsv_path, peak_rss_mb, post_cleanup_rss_mb).
     """
-    matches_tsv = intermediate_dir / f"{source_label.lower()}_matches.tsv"
-    candidates_tsv = intermediate_dir / f"{source_label.lower()}_candidates.tsv"
+    # Tier TSV
+    tiers_tsv = intermediate_dir / f"{source_label.lower()}_tiers.tsv"
     checkpoint_file = intermediate_dir / f".{source_label.lower()}_checkpoint.json"
     
     # Check if already completed under resume mode
-    if resume and matches_tsv.exists() and candidates_tsv.exists() and checkpoint_file.exists():
+    if resume and tiers_tsv.exists() and checkpoint_file.exists():
         try:
             with open(checkpoint_file, "r", encoding="utf-8") as f_cp:
                 cp = json.load(f_cp)
                 if cp.get("status") == "COMPLETED":
                     n_rows = cp.get("processed_count", 0)
-                    print(f"[{source_label.upper()} PHASE] Found completed intermediate results ({n_rows:,} S1 rows). Skipping re-computation.")
-                    return matches_tsv, candidates_tsv, get_process_memory_mb(), get_process_memory_mb()
+                    print(f"[{source_label.upper()} PHASE] Found completed intermediate tier results ({n_rows:,} S1 rows). Skipping re-computation.")
+                    return tiers_tsv, get_process_memory_mb(), get_process_memory_mb()
         except Exception:
             pass
 
     print("=" * 90)
-    print(f"[{source_label.upper()} PHASE] Indexing & Inference for {source_file.name}")
+    print(f"[{source_label.upper()} PHASE] Indexing & Candidate Generation for {source_file.name}")
     print("=" * 90)
     
     rss_phase_start = get_process_memory_mb()
@@ -186,25 +190,23 @@ def process_single_source_phase(
     rss_post_index = get_process_memory_mb()
     print(f"      [OK] {source_label.upper()} Indexed: {n_target:,} records in {t_index:.2f}s | RSS: {rss_post_index} MB (Delta: +{rss_post_index - rss_phase_start:.1f} MB)")
     
-    # Prepare intermediate TSVs
-    with open(matches_tsv, "w", encoding="utf-8", newline="") as f_m:
-        f_m.write("source1_entity_id\tmatched_entity_ids\n")
-    with open(candidates_tsv, "w", encoding="utf-8", newline="") as f_c:
-        f_c.write("source1_entity_id\tcandidate_entity_ids\n")
+    # Prepare intermediate Tier TSV
+    with open(tiers_tsv, "w", encoding="utf-8", newline="") as f_out:
+        writer = csv.writer(f_out, delimiter="\t")
+        writer.writerow(["source1_entity_id", "exact", "tokens", "char4", "char3", "addr", "scores"])
         
-    f_match = open(matches_tsv, "a", encoding="utf-8", newline="")
-    f_cand = open(candidates_tsv, "a", encoding="utf-8", newline="")
+    f_tier = open(tiers_tsv, "a", encoding="utf-8", newline="")
+    tier_writer = csv.writer(f_tier, delimiter="\t")
     
     total_processed = 0
     total_candidates = 0
     total_matches = 0
-    singletons = 0
     batch_records = []
     
     t_start = time.time()
     last_log_time = time.time()
     
-    print(f"\n  [2] Streaming S1 Queries against {source_label.upper()} (Top-K per source = {top_k_source}, Threshold = {threshold:.2f})...")
+    print(f"\n  [2] Streaming S1 Queries against {source_label.upper()} (Extracting Strategy E representation tiers, Top-K = {top_k_source})...")
     
     try:
         with open(s1_file, "r", encoding="utf-8") as f_in:
@@ -218,55 +220,50 @@ def process_single_source_phase(
                 batch_records.append(norm_s1)
                 
                 if len(batch_records) >= batch_size:
-                    c_cnt, m_cnt, s_cnt = _process_source_batch(
+                    c_cnt, m_cnt = _process_source_batch_exact(
                         batch_records,
                         target_index,
                         target_store,
                         matcher,
                         threshold,
                         top_k_source,
-                        f_match,
-                        f_cand
+                        tier_writer
                     )
                     total_candidates += c_cnt
                     total_matches += m_cnt
-                    singletons += s_cnt
                     total_processed += len(batch_records)
                     batch_records = []
                     
                     if time.time() - last_log_time >= 15.0 or (total_processed % 25000 == 0):
                         elapsed = time.time() - t_start
                         qps = total_processed / max(0.001, elapsed)
-                        print(f"      Processed {total_processed:>9,} S1 entities... (Speed: {qps:6.1f} S1/s | RSS: {get_process_memory_mb():6.1f} MB | {source_label.upper()} Cands: {total_candidates:,} | {source_label.upper()} Matches: {total_matches:,})")
+                        print(f"      Processed {total_processed:>9,} S1 entities... (Speed: {qps:6.1f} S1/s | RSS: {get_process_memory_mb():6.1f} MB | {source_label.upper()} Candidates Extracted: {total_candidates:,})")
                         last_log_time = time.time()
                         
                 if s1_limit and total_processed >= s1_limit:
                     break
                     
             if batch_records:
-                c_cnt, m_cnt, s_cnt = _process_source_batch(
+                c_cnt, m_cnt = _process_source_batch_exact(
                     batch_records,
                     target_index,
                     target_store,
                     matcher,
                     threshold,
                     top_k_source,
-                    f_match,
-                    f_cand
+                    tier_writer
                 )
                 total_candidates += c_cnt
                 total_matches += m_cnt
-                singletons += s_cnt
                 total_processed += len(batch_records)
                 
     finally:
-        f_match.close()
-        f_cand.close()
+        f_tier.close()
         
     peak_rss = get_process_memory_mb()
     total_elapsed = time.time() - t_start
-    print(f"\n  [OK] {source_label.upper()} Inference Finished: {total_processed:,} S1 entities in {total_elapsed:.2f}s ({total_processed/max(0.001, total_elapsed):.1f} S1/s)")
-    print(f"       Total {source_label.upper()} Candidates: {total_candidates:,} | Total {source_label.upper()} Matches: {total_matches:,} | Peak RSS: {peak_rss:.1f} MB")
+    print(f"\n  [OK] {source_label.upper()} Tier Extraction Finished: {total_processed:,} S1 entities in {total_elapsed:.2f}s ({total_processed/max(0.001, total_elapsed):.1f} S1/s)")
+    print(f"       Total {source_label.upper()} Candidates: {total_candidates:,} | Peak RSS: {peak_rss:.1f} MB")
     
     # Save checkpoint
     with open(checkpoint_file, "w", encoding="utf-8") as f_cp:
@@ -275,7 +272,6 @@ def process_single_source_phase(
             "source": source_label,
             "processed_count": total_processed,
             "candidates_count": total_candidates,
-            "matches_count": total_matches,
             "timestamp": datetime.now().isoformat()
         }, f_cp)
 
@@ -290,76 +286,76 @@ def process_single_source_phase(
     print(f"      [AFTER {source_label.upper()} CLEANUP] RSS: {peak_rss:.1f} MB -> {post_cleanup_rss:.1f} MB (Successfully Freed: {freed_mb:.1f} MB)")
     print("-" * 90 + "\n")
     
-    return matches_tsv, candidates_tsv, peak_rss, post_cleanup_rss
+    return tiers_tsv, peak_rss, post_cleanup_rss
 
 
-def _process_source_batch(
+def _process_source_batch_exact(
     batch_s1: List[dict],
     target_index: InvertedTokenIndex,
     target_store: Dict[str, Tuple[str, str, str]],
     matcher: EntityMatcher,
     threshold: float,
     top_k_source: int,
-    f_match,
-    f_cand
-) -> Tuple[int, int, int]:
-    """Evaluates a batch of S1 queries against one target index, writes intermediate TSV lines."""
+    tier_writer
+) -> Tuple[int, int]:
+    """Extracts 5 representation tiers and pre-scores candidates for an S1 batch."""
     total_cands = 0
     total_matches = 0
-    singletons = 0
     
     for s1_rec in batch_s1:
         s1_id = s1_rec["entity_id"]
-        # Candidate Generation via Strategy E for single source
-        cands = block_hybrid_single_source(s1_rec, target_index, top_k=top_k_source)
-        total_cands += len(cands)
+        exact, toks, g4, g3, addr = extract_source_tiers(s1_rec, target_index, top_k=top_k_source)
         
-        # Write intermediate candidate line
-        f_cand.write(f"{s1_id}\t{','.join(cands)}\n")
-        
-        matched_ids = []
-        if cands:
-            pair_feats = []
-            valid_cands = []
-            for cid in cands:
-                c_rec = target_store.get(cid)
-                if c_rec is not None:
-                    pair_feats.append(compute_pairwise_features(s1_rec, c_rec, cand_id=cid))
-                    valid_cands.append(cid)
+        # Collect unique candidate IDs across all 5 tiers
+        unique_cands = []
+        seen_c = set()
+        for c_list in (exact, toks, g4, g3, addr):
+            for cid in c_list:
+                if cid not in seen_c and cid in target_store:
+                    seen_c.add(cid)
+                    unique_cands.append(cid)
                     
-            if pair_feats:
-                X_batch = np.array(pair_feats, dtype=np.float32)
-                probas = matcher.predict_proba(X_batch)
-                for cid, prob in zip(valid_cands, probas):
-                    if prob >= threshold:
-                        matched_ids.append(cid)
-                        
-        if not matched_ids:
-            singletons += 1
-            f_match.write(f"{s1_id}\t\n")
-        else:
-            total_matches += len(matched_ids)
-            f_match.write(f"{s1_id}\t{','.join(matched_ids)}\n")
-            
-    f_match.flush()
-    f_cand.flush()
-    return total_cands, total_matches, singletons
+        total_cands += len(unique_cands)
+        
+        # Compute pairwise features and pre-score
+        scores_map = {}
+        if unique_cands:
+            pair_feats = [compute_pairwise_features(s1_rec, target_store[cid], cand_id=cid) for cid in unique_cands]
+            X_batch = np.array(pair_feats, dtype=np.float32)
+            probas = matcher.predict_proba(X_batch)
+            for cid, prob in zip(unique_cands, probas):
+                scores_map[cid] = f"{prob:.4f}"
+                if prob >= threshold:
+                    total_matches += 1
+                    
+        scores_str = ",".join(f"{k}:{v}" for k, v in scores_map.items())
+        tier_writer.writerow([
+            s1_id,
+            ",".join(exact),
+            ",".join(toks),
+            ",".join(g4),
+            ",".join(g3),
+            ",".join(addr),
+            scores_str
+        ])
+        
+    return total_cands, total_matches
 
 
 def merge_source_predictions(
-    s2_match_tsv: Path,
-    s2_cand_tsv: Path,
-    s3_match_tsv: Path,
-    s3_cand_tsv: Path,
+    s2_tiers_tsv: Path,
+    s3_tiers_tsv: Path,
     final_matching_tsv: Path,
-    final_candidate_tsv: Path
+    final_candidate_tsv: Path,
+    top_k: int = 50,
+    threshold: float = 0.83
 ) -> Tuple[int, int, int, int]:
     """
-    Stream-merges intermediate S2 and S3 output TSVs into official competition submission format.
+    Stream-merges intermediate S2 and S3 tiers TSVs using EXACT Strategy E global selection.
     Memory-safe (O(1) RAM) streaming line-by-line.
     """
     print("=" * 90)
-    print("[PHASE 3/3] Stream-Merging S2 and S3 Predictions into Final Submission TSVs")
+    print("[PHASE 3/3] Stream-Merging S2 and S3 Tiers into Exact Strategy E Submission TSVs")
     print("=" * 90)
     t0 = time.time()
     
@@ -368,57 +364,66 @@ def merge_source_predictions(
     total_matches = 0
     singletons = 0
     
-    # 1. Merge Matches
-    print(f"  -> Merging Matches: {s2_match_tsv.name} + {s3_match_tsv.name} -> {final_matching_tsv.name} ...")
-    with open(s2_match_tsv, "r", encoding="utf-8") as f2_m, \
-         open(s3_match_tsv, "r", encoding="utf-8") as f3_m, \
-         open(final_matching_tsv, "w", encoding="utf-8", newline="") as f_out_m:
+    with open(s2_tiers_tsv, "r", encoding="utf-8") as f2, \
+         open(s3_tiers_tsv, "r", encoding="utf-8") as f3, \
+         open(final_matching_tsv, "w", encoding="utf-8", newline="") as f_match, \
+         open(final_candidate_tsv, "w", encoding="utf-8", newline="") as f_cand:
          
-        next(f2_m, None)
-        next(f3_m, None)
-        f_out_m.write("source1_entity_id\tmatched_entity_ids\n")
+        r2 = csv.reader(f2, delimiter="\t")
+        r3 = csv.reader(f3, delimiter="\t")
         
-        for l2, l3 in zip(f2_m, f3_m):
-            p2 = l2.rstrip("\r\n").split("\t", 1)
-            p3 = l3.rstrip("\r\n").split("\t", 1)
-            s1_id = p2[0]
+        # Skip header
+        next(r2, None)
+        next(r3, None)
+        
+        f_match.write("source1_entity_id\tmatched_entity_ids\n")
+        f_cand.write("source1_entity_id\tcandidate_entity_ids\n")
+        
+        for row2, row3 in zip(r2, r3):
+            s1_id = row2[0]
+            assert s1_id == row3[0], f"S1 entity mismatch during merge: {s1_id} vs {row3[0]}"
             
-            m2 = p2[1].split(",") if (len(p2) > 1 and p2[1]) else []
-            m3 = p3[1].split(",") if (len(p3) > 1 and p3[1]) else []
+            # Parse S2 tiers
+            s2_exact = row2[1].split(",") if row2[1] else []
+            s2_toks = row2[2].split(",") if row2[2] else []
+            s2_g4 = row2[3].split(",") if row2[3] else []
+            s2_g3 = row2[4].split(",") if row2[4] else []
+            s2_addr = row2[5].split(",") if row2[5] else []
+            s2_scores = dict(kv.split(":") for kv in row2[6].split(",")) if row2[6] else {}
+            s2_tiers = (s2_exact, s2_toks, s2_g4, s2_g3, s2_addr)
             
-            merged_matches = m2 + m3
-            if merged_matches:
-                total_matches += len(merged_matches)
-                f_out_m.write(f"{s1_id}\t{','.join(merged_matches)}\n")
+            # Parse S3 tiers
+            s3_exact = row3[1].split(",") if row3[1] else []
+            s3_toks = row3[2].split(",") if row3[2] else []
+            s3_g4 = row3[3].split(",") if row3[3] else []
+            s3_g3 = row3[4].split(",") if row3[4] else []
+            s3_addr = row3[5].split(",") if row3[5] else []
+            s3_scores = dict(kv.split(":") for kv in row3[6].split(",")) if row3[6] else {}
+            s3_tiers = (s3_exact, s3_toks, s3_g4, s3_g3, s3_addr)
+            
+            # Execute EXACT original Strategy E global merge
+            final_cands = merge_strategy_e_tiers(s2_tiers, s3_tiers, top_k=top_k)
+            total_candidates += len(final_cands)
+            f_cand.write(f"{s1_id}\t{','.join(final_cands)}\n")
+            
+            # Filter matches by decision threshold
+            matched_ids = []
+            for cid in final_cands:
+                score_str = s2_scores.get(cid) or s3_scores.get(cid)
+                if score_str is not None and float(score_str) >= threshold:
+                    matched_ids.append(cid)
+                    
+            if matched_ids:
+                total_matches += len(matched_ids)
+                f_match.write(f"{s1_id}\t{','.join(matched_ids)}\n")
             else:
                 singletons += 1
-                f_out_m.write(f"{s1_id}\t\n")
+                f_match.write(f"{s1_id}\t\n")
+                
             total_s1 += 1
             
-    # 2. Merge Candidates
-    print(f"  -> Merging Candidates: {s2_cand_tsv.name} + {s3_cand_tsv.name} -> {final_candidate_tsv.name} ...")
-    with open(s2_cand_tsv, "r", encoding="utf-8") as f2_c, \
-         open(s3_cand_tsv, "r", encoding="utf-8") as f3_c, \
-         open(final_candidate_tsv, "w", encoding="utf-8", newline="") as f_out_c:
-         
-        next(f2_c, None)
-        next(f3_c, None)
-        f_out_c.write("source1_entity_id\tcandidate_entity_ids\n")
-        
-        for l2, l3 in zip(f2_c, f3_c):
-            p2 = l2.rstrip("\r\n").split("\t", 1)
-            p3 = l3.rstrip("\r\n").split("\t", 1)
-            s1_id = p2[0]
-            
-            c2 = p2[1].split(",") if (len(p2) > 1 and p2[1]) else []
-            c3 = p3[1].split(",") if (len(p3) > 1 and p3[1]) else []
-            
-            merged_cands = c2 + c3
-            total_candidates += len(merged_cands)
-            f_out_c.write(f"{s1_id}\t{','.join(merged_cands)}\n")
-            
     elapsed = time.time() - t0
-    print(f"  [OK] Stream Merge Complete in {elapsed:.2f}s | S1: {total_s1:,} | Matches: {total_matches:,} | Candidates: {total_candidates:,} | Singletons: {singletons:,}\n")
+    print(f"  [OK] Exact Stream Merge Complete in {elapsed:.2f}s | S1: {total_s1:,} | Matches: {total_matches:,} | Candidates: {total_candidates:,} | Singletons: {singletons:,}\n")
     return total_s1, total_candidates, total_matches, singletons
 
 
@@ -486,16 +491,14 @@ def run_production_pipeline(
     final_matching_tsv = out_path / "matching_results.tsv"
     final_candidate_tsv = out_path / "candidate_pairs.tsv"
     
-    top_k_per_source = max(1, top_k // 2)
-
-    # 4. Phase 1: Source 2 Processing
-    s2_m_tsv, s2_c_tsv, s2_peak_rss, s2_post_rss = process_single_source_phase(
+    # 4. Phase 1: Source 2 Processing (Exact Strategy E Tier Extraction & Pre-Scoring)
+    s2_tiers_tsv, s2_peak_rss, s2_post_rss = process_single_source_phase(
         source_label="S2",
         source_file=s2_file,
         s1_file=s1_file,
         matcher=matcher,
         threshold=tau,
-        top_k_source=top_k_per_source,
+        top_k_source=top_k,
         intermediate_dir=intermediate_dir,
         batch_size=batch_size,
         s1_limit=s1_limit,
@@ -503,14 +506,14 @@ def run_production_pipeline(
         resume=resume
     )
     
-    # 5. Phase 2: Source 3 Processing
-    s3_m_tsv, s3_c_tsv, s3_peak_rss, s3_post_rss = process_single_source_phase(
+    # 5. Phase 2: Source 3 Processing (Exact Strategy E Tier Extraction & Pre-Scoring)
+    s3_tiers_tsv, s3_peak_rss, s3_post_rss = process_single_source_phase(
         source_label="S3",
         source_file=s3_file,
         s1_file=s1_file,
         matcher=matcher,
         threshold=tau,
-        top_k_source=top_k_per_source,
+        top_k_source=top_k,
         intermediate_dir=intermediate_dir,
         batch_size=batch_size,
         s1_limit=s1_limit,
@@ -518,14 +521,14 @@ def run_production_pipeline(
         resume=resume
     )
     
-    # 6. Phase 3: Merge Predictions & Candidates
+    # 6. Phase 3: Exact Global Stream Merge & Selection
     total_s1, total_cands, total_matches, singletons = merge_source_predictions(
-        s2_match_tsv=s2_m_tsv,
-        s2_cand_tsv=s2_c_tsv,
-        s3_match_tsv=s3_m_tsv,
-        s3_cand_tsv=s3_c_tsv,
+        s2_tiers_tsv=s2_tiers_tsv,
+        s3_tiers_tsv=s3_tiers_tsv,
         final_matching_tsv=final_matching_tsv,
-        final_candidate_tsv=final_candidate_tsv
+        final_candidate_tsv=final_candidate_tsv,
+        top_k=top_k,
+        threshold=tau
     )
     
     total_pipeline_time = round(time.time() - t_pipeline_start, 2)

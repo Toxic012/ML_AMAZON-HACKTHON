@@ -32,6 +32,8 @@ output/
 outputs/
 results/
 artifacts/
+temp_*/
 experiments/*/results/
 experiments/*/artifacts/
 experiments/*/logs/
+

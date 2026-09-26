@@ -287,6 +287,98 @@ def block_hybrid_A_char3_char4(s1_record: dict, s2_index: InvertedTokenIndex, s3
     return result[:top_k]
 
 
+def extract_source_tiers(s1_record: dict, target_index: InvertedTokenIndex, top_k: int = 50) -> Tuple[List[str], List[str], List[str], List[str], List[str]]:
+    """
+    Extracts the 5 Strategy E representation tiers for a single target index up to top_k.
+    Used for memory-safe sequential processing and exact global union reconstruction.
+    """
+    country = s1_record.get("country", "")
+    norm_name = s1_record.get("norm_name", "")
+    tokens = s1_record.get("name_tokens", set())
+    c3 = s1_record.get("char_3grams", set())
+    c4 = s1_record.get("char_4grams", set())
+    addr_tokens = s1_record.get("addr_tokens", set())
+    postal_tokens = s1_record.get("postal_tokens", set())
+    
+    exact = target_index.search_exact(country, norm_name)
+    toks = target_index.search_tokens(country, tokens, top_k=top_k)
+    g4 = target_index.search_char_ngrams(country, c4, n=4, top_k=top_k)
+    g3 = target_index.search_char_ngrams(country, c3, n=3, top_k=top_k)
+    addr = target_index.search_address(country, addr_tokens, postal_tokens, top_k=top_k)
+    return (exact, toks, g4, g3, addr)
+
+
+def merge_strategy_e_tiers(
+    s2_tiers: Tuple[List[str], List[str], List[str], List[str], List[str]],
+    s3_tiers: Tuple[List[str], List[str], List[str], List[str], List[str]],
+    top_k: int = 50
+) -> List[str]:
+    """
+    Reconstructs the EXACT original Strategy E global candidate selection from
+    decoupled S2 and S3 tier representations.
+    """
+    s2_exact, s2_tokens, s2_char4, s2_char3, s2_addr = s2_tiers
+    s3_exact, s3_tokens, s3_char4, s3_char3, s3_addr = s3_tiers
+    
+    seen = set()
+    result = []
+    
+    # 1. Exact Name Priority
+    for eid in s2_exact + s3_exact:
+        if eid not in seen:
+            seen.add(eid)
+            result.append(eid)
+            
+    # 2. Word Token Overlap
+    rem = top_k - len(result)
+    if rem > 0:
+        quota = max(1, int(rem * 0.45))
+        half_q = max(1, quota // 2)
+        for eid in s2_tokens[:half_q] + s3_tokens[:half_q]:
+            if eid not in seen:
+                seen.add(eid)
+                result.append(eid)
+            if len(result) >= top_k:
+                break
+                
+    # 3. Char 4-Gram Overlap
+    rem = top_k - len(result)
+    if rem > 0:
+        quota = max(1, int(rem * 0.35))
+        half_q = max(1, quota // 2)
+        for eid in s2_char4[:half_q] + s3_char4[:half_q]:
+            if eid not in seen:
+                seen.add(eid)
+                result.append(eid)
+            if len(result) >= top_k:
+                break
+
+    # 4. Char 3-Gram Overlap
+    rem = top_k - len(result)
+    if rem > 0:
+        quota = max(1, int(rem * 0.5))
+        half_q = max(1, quota // 2)
+        for eid in s2_char3[:half_q] + s3_char3[:half_q]:
+            if eid not in seen:
+                seen.add(eid)
+                result.append(eid)
+            if len(result) >= top_k:
+                break
+                
+    # 5. Address & Postal Token Overlap
+    rem = top_k - len(result)
+    if rem > 0:
+        half_rem = max(1, rem // 2)
+        for eid in s2_addr[:half_rem] + s3_addr[:half_rem]:
+            if eid not in seen:
+                seen.add(eid)
+                result.append(eid)
+            if len(result) >= top_k:
+                break
+                
+    return result[:top_k]
+
+
 def block_hybrid_single_source(s1_record: dict, target_index: InvertedTokenIndex, top_k: int = 25) -> List[str]:
     """
     Single-source candidate generation using the frozen EXP-0003 Strategy E multi-representation logic.
