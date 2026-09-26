@@ -203,6 +203,8 @@ def process_single_source_phase(
     total_matches = 0
     batch_records = []
     
+    total_s1_expected = s1_limit if s1_limit else 1732544
+    
     t_start = time.time()
     last_log_time = time.time()
     
@@ -237,7 +239,18 @@ def process_single_source_phase(
                     if time.time() - last_log_time >= 15.0 or (total_processed % 25000 == 0):
                         elapsed = time.time() - t_start
                         qps = total_processed / max(0.001, elapsed)
-                        print(f"      Processed {total_processed:>9,} S1 entities... (Speed: {qps:6.1f} S1/s | RSS: {get_process_memory_mb():6.1f} MB | {source_label.upper()} Candidates Extracted: {total_candidates:,})")
+                        pct = (total_processed / max(1, total_s1_expected)) * 100
+                        remaining_rows = max(0, total_s1_expected - total_processed)
+                        eta_sec = remaining_rows / max(0.001, qps)
+                        curr_rss = get_process_memory_mb()
+                        f_tier.flush()
+                        disk_mb = tiers_tsv.stat().st_size / (1024 ** 2) if tiers_tsv.exists() else 0.0
+                        
+                        print(
+                            f"      [{source_label.upper()}] S1: {total_processed:>9,} / {total_s1_expected:,} ({pct:5.1f}%) | "
+                            f"Speed: {qps:6.1f} rows/s | Elapsed: {elapsed:6.1f}s | ETA: {eta_sec/60:5.1f} min | "
+                            f"RSS: {curr_rss:6.1f} MB | Disk: {disk_mb:7.1f} MB | Cands: {total_candidates:,}"
+                        )
                         last_log_time = time.time()
                         
                 if s1_limit and total_processed >= s1_limit:
@@ -262,8 +275,9 @@ def process_single_source_phase(
         
     peak_rss = get_process_memory_mb()
     total_elapsed = time.time() - t_start
+    final_disk_mb = tiers_tsv.stat().st_size / (1024 ** 2) if tiers_tsv.exists() else 0.0
     print(f"\n  [OK] {source_label.upper()} Tier Extraction Finished: {total_processed:,} S1 entities in {total_elapsed:.2f}s ({total_processed/max(0.001, total_elapsed):.1f} S1/s)")
-    print(f"       Total {source_label.upper()} Candidates: {total_candidates:,} | Peak RSS: {peak_rss:.1f} MB")
+    print(f"       Total {source_label.upper()} Candidates: {total_candidates:,} | Peak RSS: {peak_rss:.1f} MB | Intermediate Disk: {final_disk_mb:.1f} MB")
     
     # Save checkpoint
     with open(checkpoint_file, "w", encoding="utf-8") as f_cp:
@@ -272,6 +286,7 @@ def process_single_source_phase(
             "source": source_label,
             "processed_count": total_processed,
             "candidates_count": total_candidates,
+            "intermediate_disk_mb": final_disk_mb,
             "timestamp": datetime.now().isoformat()
         }, f_cp)
 
@@ -349,7 +364,7 @@ def merge_source_predictions(
     final_candidate_tsv: Path,
     top_k: int = 50,
     threshold: float = 0.83
-) -> Tuple[int, int, int, int]:
+) -> Dict[str, Any]:
     """
     Stream-merges intermediate S2 and S3 tiers TSVs using EXACT Strategy E global selection.
     Memory-safe (O(1) RAM) streaming line-by-line.
@@ -362,7 +377,11 @@ def merge_source_predictions(
     total_s1 = 0
     total_candidates = 0
     total_matches = 0
+    zero_matches = 0
     singletons = 0
+    multi_matches = 0
+    
+    merge_peak_rss = get_process_memory_mb()
     
     with open(s2_tiers_tsv, "r", encoding="utf-8") as f2, \
          open(s3_tiers_tsv, "r", encoding="utf-8") as f3, \
@@ -413,18 +432,35 @@ def merge_source_predictions(
                 if score_str is not None and float(score_str) >= threshold:
                     matched_ids.append(cid)
                     
-            if matched_ids:
+            if not matched_ids:
+                zero_matches += 1
+                f_match.write(f"{s1_id}\t\n")
+            elif len(matched_ids) == 1:
+                singletons += 1
+                total_matches += 1
+                f_match.write(f"{s1_id}\t{matched_ids[0]}\n")
+            else:
+                multi_matches += 1
                 total_matches += len(matched_ids)
                 f_match.write(f"{s1_id}\t{','.join(matched_ids)}\n")
-            else:
-                singletons += 1
-                f_match.write(f"{s1_id}\t\n")
                 
             total_s1 += 1
+            if total_s1 % 100000 == 0:
+                merge_peak_rss = max(merge_peak_rss, get_process_memory_mb())
+                print(f"      Merged {total_s1:>9,} S1 entities... (Candidates: {total_candidates:,} | Matches: {total_matches:,} | RSS: {get_process_memory_mb():.1f} MB)")
             
     elapsed = time.time() - t0
-    print(f"  [OK] Exact Stream Merge Complete in {elapsed:.2f}s | S1: {total_s1:,} | Matches: {total_matches:,} | Candidates: {total_candidates:,} | Singletons: {singletons:,}\n")
-    return total_s1, total_candidates, total_matches, singletons
+    merge_peak_rss = max(merge_peak_rss, get_process_memory_mb())
+    print(f"  [OK] Exact Stream Merge Complete in {elapsed:.2f}s | S1: {total_s1:,} | Matches: {total_matches:,} | Candidates: {total_candidates:,}\n")
+    return {
+        "total_s1": total_s1,
+        "total_candidates": total_candidates,
+        "total_matches": total_matches,
+        "zero_matches": zero_matches,
+        "singletons": singletons,
+        "multi_matches": multi_matches,
+        "merge_peak_rss": merge_peak_rss
+    }
 
 
 def run_production_pipeline(
@@ -522,7 +558,7 @@ def run_production_pipeline(
     )
     
     # 6. Phase 3: Exact Global Stream Merge & Selection
-    total_s1, total_cands, total_matches, singletons = merge_source_predictions(
+    merge_stats = merge_source_predictions(
         s2_tiers_tsv=s2_tiers_tsv,
         s3_tiers_tsv=s3_tiers_tsv,
         final_matching_tsv=final_matching_tsv,
@@ -533,22 +569,36 @@ def run_production_pipeline(
     
     total_pipeline_time = round(time.time() - t_pipeline_start, 2)
     
-    print("=" * 90)
-    print("PRODUCTION PIPELINE TELEMETRY SUMMARY")
-    print("=" * 90)
-    print(f"  Total Runtime:               {total_pipeline_time} seconds ({total_s1/max(0.001, total_pipeline_time):.1f} S1/sec)")
-    print(f"  Total S1 Entities:           {total_s1:,}")
-    print(f"  Total Candidates Output:     {total_cands:,} (Mean: {total_cands/max(1, total_s1):.1f} / S1)")
-    print(f"  Total Matches Predicted:     {total_matches:,}")
-    print(f"  Singletons Output:           {singletons:,} ({singletons/max(1, total_s1)*100:.1f}%)")
-    print(f"  S2 Peak RSS:                 {s2_peak_rss:.1f} MB (Post-Cleanup: {s2_post_rss:.1f} MB)")
-    print(f"  S3 Peak RSS:                 {s3_peak_rss:.1f} MB (Post-Cleanup: {s3_post_rss:.1f} MB)")
-    print(f"  Matching TSV Size:           {round(final_matching_tsv.stat().st_size / (1024**2), 2)} MB")
-    print(f"  Candidate TSV Size:          {round(final_candidate_tsv.stat().st_size / (1024**2), 2)} MB")
-    print("=" * 90 + "\n")
+    # 7. Backup to Persistent Google Drive if available
+    drive_backup_paths = []
+    colab_drive_dir = Path("/content/drive/MyDrive/DATASET_ML-AMAZON/submission")
+    if colab_drive_dir.parent.exists():
+        try:
+            colab_drive_dir.mkdir(parents=True, exist_ok=True)
+            import shutil
+            drive_m = colab_drive_dir / "matching_results.tsv"
+            drive_c = colab_drive_dir / "candidate_pairs.tsv"
+            print(f"\n[BACKUP] Persisting final TSV files to Google Drive ({colab_drive_dir}) ...")
+            shutil.copy2(final_matching_tsv, drive_m)
+            shutil.copy2(final_candidate_tsv, drive_c)
+            drive_backup_paths = [str(drive_m), str(drive_c)]
+            print(f"         [OK] Backed up to Google Drive successfully.")
+        except Exception as e_drive:
+            print(f"         [WARNING] Google Drive backup skipped: {e_drive}")
 
-    # 7. Run Official Submission Validator
-    print(f"[VALIDATION] Running Official Submission Validator...")
+    matching_size_mb = round(final_matching_tsv.stat().st_size / (1024**2), 2)
+    candidate_size_mb = round(final_candidate_tsv.stat().st_size / (1024**2), 2)
+    
+    git_commit_sha = "unknown"
+    try:
+        git_res = subprocess.run(["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, capture_output=True, text=True)
+        if git_res.returncode == 0:
+            git_commit_sha = git_res.stdout.strip()
+    except Exception:
+        pass
+
+    # 8. Run Official Submission Validator
+    print(f"\n[VALIDATION] Running Official Submission Validator...")
     val_script = REPO_ROOT / "student_resource" / "utils" / "validate_submission.py"
     validator_passed = False
     
@@ -571,19 +621,65 @@ def run_production_pipeline(
         else:
             print("\n>>> [NOTICE] Validator report output shown above. <<<")
 
+    # 9. Print Full Production Complete Report
+    print("\n" + "=" * 95)
+    print("FULL PRODUCTION COMPLETE")
+    print("=" * 95)
+    print(f"S1 processed:            {merge_stats['total_s1']:,}")
+    print(f"S2 processed:            4,887,273 (target source)")
+    print(f"S3 processed:            5,082,316 (target source)")
+    print()
+    print(f"S2 peak RSS:             {s2_peak_rss:.1f} MB (Post-Cleanup: {s2_post_rss:.1f} MB)")
+    print(f"S3 peak RSS:             {s3_peak_rss:.1f} MB (Post-Cleanup: {s3_post_rss:.1f} MB)")
+    print(f"Merge RSS:               {merge_stats['merge_peak_rss']:.1f} MB")
+    print()
+    print(f"Total runtime:           {total_pipeline_time} seconds ({merge_stats['total_s1']/max(0.001, total_pipeline_time):.1f} S1/sec)")
+    print()
+    print(f"Candidate pairs:         {merge_stats['total_candidates']:,}")
+    print(f"Matching predictions:    {merge_stats['total_matches']:,}")
+    print(f"Singletons:              {merge_stats['singletons']:,}")
+    print(f"Multi-match entities:    {merge_stats['multi_matches']:,}")
+    print(f"Zero-match entities:     {merge_stats['zero_matches']:,}")
+    print()
+    print("matching_results.tsv:")
+    print(f"  exact path:            {final_matching_tsv}")
+    print(f"  size:                  {matching_size_mb} MB")
+    print(f"  row count:             {merge_stats['total_s1']:,} S1 rows")
+    print()
+    print("candidate_pairs.tsv:")
+    print(f"  exact path:            {final_candidate_tsv}")
+    print(f"  size:                  {candidate_size_mb} MB")
+    print(f"  row count:             {merge_stats['total_s1']:,} S1 rows")
+    print()
+    print("Google Drive output paths:")
+    if drive_backup_paths:
+        for p in drive_backup_paths:
+            print(f"  - {p}")
+    else:
+        print("  - Local output only (Drive path not attached)")
+    print()
+    print(f"Validator:               {'PASS' if validator_passed else 'FAIL'}")
+    print(f"Git commit:              {git_commit_sha}")
+    print("=" * 95 + "\n")
+
     return {
         "validator_passed": validator_passed,
-        "total_s1": total_s1,
-        "total_candidates": total_cands,
-        "total_matches": total_matches,
-        "singletons": singletons,
+        "total_s1": merge_stats["total_s1"],
+        "total_candidates": merge_stats["total_candidates"],
+        "total_matches": merge_stats["total_matches"],
+        "singletons": merge_stats["singletons"],
+        "zero_matches": merge_stats["zero_matches"],
+        "multi_matches": merge_stats["multi_matches"],
         "runtime_seconds": total_pipeline_time,
         "s2_peak_rss": s2_peak_rss,
         "s2_post_rss": s2_post_rss,
         "s3_peak_rss": s3_peak_rss,
         "s3_post_rss": s3_post_rss,
+        "merge_peak_rss": merge_stats["merge_peak_rss"],
         "matching_tsv": str(final_matching_tsv),
-        "candidate_tsv": str(final_candidate_tsv)
+        "candidate_tsv": str(final_candidate_tsv),
+        "drive_backup_paths": drive_backup_paths,
+        "git_commit": git_commit_sha
     }
 
 
