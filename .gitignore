@@ -1,0 +1,32 @@
+# Challenge datasets
+student_resource/dataset/
+student_resource/sample_dataset/
+
+# Large archives
+*.zip
+*.7z
+*.rar
+*.tar
+*.tar.gz
+
+# Environment/secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# OS
+.DS_Store
+Thumbs.db
+__MACOSX/
+
+# Generated artifacts
+output/
+outputs/
+results/
+artifacts/
