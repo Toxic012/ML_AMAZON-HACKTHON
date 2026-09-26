@@ -75,6 +75,7 @@ def evaluate_blocking_strategy(
     s1_with_at_least_one_recovered = 0
     
     candidate_counts = []
+    recovered_pair_ids = set()
     
     for s1 in s1_records:
         s1_id = s1["entity_id"]
@@ -96,6 +97,9 @@ def evaluate_blocking_strategy(
             matched_in_cands = true_matches & cand_set
             recovered_gt_pairs += len(matched_in_cands)
             total_gt_pairs += len(true_matches)
+            
+            for m in matched_in_cands:
+                recovered_pair_ids.add((s1_id, m))
             
             if len(matched_in_cands) > 0:
                 s1_with_at_least_one_recovered += 1
@@ -133,6 +137,7 @@ def evaluate_blocking_strategy(
         "s1_entity_coverage": s1_coverage,
         "total_gt_pairs": total_gt_pairs,
         "recovered_gt_pairs": recovered_gt_pairs,
+        "_recovered_pair_ids": recovered_pair_ids,
         "candidate_volume": {
             "total_candidate_pairs": total_candidates_generated,
             "mean_per_s1": round(float(np.mean(cand_arr)), 2),

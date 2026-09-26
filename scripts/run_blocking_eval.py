@@ -189,12 +189,28 @@ def run_blocking_experiment(
 
     # 4. Evaluate Strategies
     if not strategies_to_test:
-        strategies_to_test = list(STRATEGIES.keys())
+        strategies_to_test = [
+            "exact_name",
+            "rare_tokens",
+            "char_3gram",
+            "char_4gram",
+            "address_tokens",
+            "ablation_A_disjunctive",
+            "ablation_B_char3",
+            "ablation_C_char4",
+            "ablation_D_char3_char4",
+            "ablation_E_full_hybrid"
+        ]
         
     print(f"\n[4] Benchmarking Candidate Generation Strategies on Validated Universe...")
     results = {}
     
+    baseline_recovered_pairs = None
+    
     for strat_name in strategies_to_test:
+        if strat_name not in STRATEGIES:
+            print(f"    [SKIP] Unknown strategy: {strat_name}")
+            continue
         strat_fn = STRATEGIES[strat_name]
         print(f"    -> Evaluating: {strat_name} (top_k={top_k}) ...")
         eval_metrics = evaluate_blocking_strategy(
@@ -206,28 +222,41 @@ def run_blocking_experiment(
             indexed_target_ids=indexed_target_ids,
             top_k=top_k
         )
+        
+        # Marginal gain computation relative to Ablation A
+        strat_recovered = eval_metrics.pop("_recovered_pair_ids", set())
+        if strat_name in ("ablation_A_disjunctive", "disjunctive_union"):
+            baseline_recovered_pairs = strat_recovered
+            eval_metrics["newly_recovered_true_pairs_vs_A"] = 0
+        elif baseline_recovered_pairs is not None:
+            new_pairs = strat_recovered - baseline_recovered_pairs
+            eval_metrics["newly_recovered_true_pairs_vs_A"] = len(new_pairs)
+        else:
+            eval_metrics["newly_recovered_true_pairs_vs_A"] = 0
+            
         results[strat_name] = eval_metrics
 
     # 5. Comparative Summary Table
-    print("\n" + "=" * 115)
-    print("CORRECTED STRATEGY COMPARISON SUMMARY TABLE (METHODOLOGICALLY VALIDATED)")
-    print("=" * 115)
-    header = f"{'Strategy':<20} | {'Recall':<8} | {'S2 Rec':<8} | {'S3 Rec':<8} | {'S1 Cov':<8} | {'Mean Cand':<9} | {'P95 Cand':<8} | {'Max Cand':<8} | {'QPS':<8} | {'Time (s)'}"
+    print("\n" + "=" * 130)
+    print(f"CORRECTED STRATEGY & ABLATION COMPARISON SUMMARY TABLE — {experiment_id}")
+    print("=" * 130)
+    header = f"{'Strategy / Ablation':<25} | {'Recall':<8} | {'S2 Rec':<8} | {'S3 Rec':<8} | {'S1 Cov':<8} | {'New vs A':<8} | {'Mean Cand':<9} | {'P95 Cand':<8} | {'Max Cand':<8} | {'QPS':<8} | {'Time (s)'}"
     print(header)
-    print("-" * 115)
+    print("-" * 130)
     
     for strat_name, m in results.items():
         rec = f"{m['true_pair_recall']*100:.2f}%"
         s2_r = f"{m['s2_recall']*100:.2f}%"
         s3_r = f"{m['s3_recall']*100:.2f}%"
         cov = f"{m['s1_entity_coverage']*100:.2f}%"
+        new_vs_a = f"+{m.get('newly_recovered_true_pairs_vs_A', 0)}" if m.get('newly_recovered_true_pairs_vs_A', 0) > 0 else f"{m.get('newly_recovered_true_pairs_vs_A', 0)}"
         mean_c = f"{m['candidate_volume']['mean_per_s1']:.1f}"
         p95_c = f"{m['candidate_volume']['p95_per_s1']:.0f}"
         max_c = f"{m['candidate_volume']['max_per_s1']}"
         qps = f"{m['performance']['queries_per_sec']:.1f}"
         t_sec = f"{m['performance']['query_time_sec']:.2f}"
-        print(f"{strat_name:<20} | {rec:<8} | {s2_r:<8} | {s3_r:<8} | {cov:<8} | {mean_c:<9} | {p95_c:<8} | {max_c:<8} | {qps:<8} | {t_sec}")
-    print("=" * 115)
+        print(f"{strat_name:<25} | {rec:<8} | {s2_r:<8} | {s3_r:<8} | {cov:<8} | {new_vs_a:<8} | {mean_c:<9} | {p95_c:<8} | {max_c:<8} | {qps:<8} | {t_sec}")
+    print("=" * 130)
 
     # 6. Save Telemetry
     experiment_payload = {
@@ -272,20 +301,20 @@ def run_blocking_experiment(
         with open(meta_file, "w", encoding="utf-8") as f:
             json.dump(experiment_payload, f, indent=2)
             
-        print(f"\n[OK] Corrected experiment results saved to: {res_file}")
+        print(f"\n[OK] Experiment results saved to: {res_file}")
 
     return experiment_payload
 
 
 def main():
-    parser = argparse.ArgumentParser(description="EXP-0002 Corrected Blocking Strategy Evaluation")
+    parser = argparse.ArgumentParser(description="EXP-0003 Character N-Gram & Address Blocking Evaluation")
     parser.add_argument("--data-dir", type=str, default=None, help="Dataset directory path")
-    parser.add_argument("--sample-size", type=int, default=1000, help="S1 query sample size (e.g. 1000, 2000, 5000)")
-    parser.add_argument("--target-sample-size", type=int, default=50000, help="Target S2/S3 sample size per source")
+    parser.add_argument("--sample-size", type=int, default=500, help="S1 query sample size (e.g. 500, 1000, 2000, 5000)")
+    parser.add_argument("--target-sample-size", type=int, default=20000, help="Target S2/S3 sample size per source")
     parser.add_argument("--top-k", type=int, default=50, help="Candidate capacity per query")
     parser.add_argument("--max-token-freq", type=int, default=5000, help="Frequency limit for inverted index tokens")
     parser.add_argument("--strategies", nargs="+", default=None, help="Strategies to evaluate")
-    parser.add_argument("--experiment-id", type=str, default="EXP-0002_blocking_eval", help="Experiment ID")
+    parser.add_argument("--experiment-id", type=str, default="EXP-0003_blocking_char_address", help="Experiment ID")
     parser.add_argument("--seed", type=int, default=SEED, help="Random seed")
     
     args = parser.parse_args()
