@@ -27,11 +27,12 @@ import csv
 import time
 import json
 import gc
+import warnings
 import argparse
 import subprocess
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, List, Set, Tuple, Optional
+from typing import Dict, List, Set, Tuple, Optional, Any
 import numpy as np
 
 # Increase csv field limit
@@ -249,7 +250,8 @@ def process_single_source_phase(
                         print(
                             f"      [{source_label.upper()}] S1: {total_processed:>9,} / {total_s1_expected:,} ({pct:5.1f}%) | "
                             f"Speed: {qps:6.1f} rows/s | Elapsed: {elapsed:6.1f}s | ETA: {eta_sec/60:5.1f} min | "
-                            f"RSS: {curr_rss:6.1f} MB | Disk: {disk_mb:7.1f} MB | Cands: {total_candidates:,}"
+                            f"RSS: {curr_rss:6.1f} MB | Disk: {disk_mb:7.1f} MB | Cands: {total_candidates:,}",
+                            flush=True
                         )
                         last_log_time = time.time()
                         
@@ -317,8 +319,11 @@ def _process_source_batch_exact(
     total_cands = 0
     total_matches = 0
     
+    batch_tiers = []
+    all_features = []
+    s1_cand_ranges = []
+    
     for s1_rec in batch_s1:
-        s1_id = s1_rec["entity_id"]
         exact, toks, g4, g3, addr = extract_source_tiers(s1_rec, target_index, top_k=top_k_source)
         
         # Collect unique candidate IDs across all 5 tiers
@@ -331,14 +336,27 @@ def _process_source_batch_exact(
                     unique_cands.append(cid)
                     
         total_cands += len(unique_cands)
+        batch_tiers.append((s1_rec["entity_id"], exact, toks, g4, g3, addr, unique_cands))
         
-        # Compute pairwise features and pre-score
+        start_idx = len(all_features)
+        if unique_cands:
+            for cid in unique_cands:
+                all_features.append(compute_pairwise_features(s1_rec, target_store[cid], cand_id=cid))
+        end_idx = len(all_features)
+        s1_cand_ranges.append((start_idx, end_idx))
+        
+    all_probas = []
+    if all_features:
+        X_batch = np.array(all_features, dtype=np.float32)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=UserWarning)
+            all_probas = matcher.predict_proba(X_batch)
+            
+    for (s1_id, exact, toks, g4, g3, addr, unique_cands), (start_idx, end_idx) in zip(batch_tiers, s1_cand_ranges):
         scores_map = {}
         if unique_cands:
-            pair_feats = [compute_pairwise_features(s1_rec, target_store[cid], cand_id=cid) for cid in unique_cands]
-            X_batch = np.array(pair_feats, dtype=np.float32)
-            probas = matcher.predict_proba(X_batch)
-            for cid, prob in zip(unique_cands, probas):
+            c_probas = all_probas[start_idx:end_idx]
+            for cid, prob in zip(unique_cands, c_probas):
                 scores_map[cid] = f"{prob:.4f}"
                 if prob >= threshold:
                     total_matches += 1

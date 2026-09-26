@@ -1,5 +1,6 @@
 import json
 import pickle
+import warnings
 from pathlib import Path
 from typing import Dict, List, Set, Tuple, Optional, Any
 import numpy as np
@@ -61,12 +62,14 @@ class EntityMatcher:
         )
         return self
 
-    def predict_proba(self, X: np.ndarray) -> np.ndarray:
+    def predict_proba(self, X: Any) -> np.ndarray:
         if self.model is None:
             raise ValueError("Model is not fitted yet.")
         if len(X) == 0:
-            return np.array([])
-        return self.model.predict_proba(X)[:, 1]
+            return np.array([], dtype=np.float32)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=UserWarning)
+            return self.model.predict_proba(X)[:, 1]
 
     def get_feature_importances(self) -> Dict[str, float]:
         if self.model is None:
