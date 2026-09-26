@@ -194,15 +194,29 @@ def process_single_source_phase(
     rss_post_index = get_process_memory_mb()
     print(f"      [OK] {source_label.upper()} Indexed: {n_target:,} records in {t_index:.2f}s | RSS: {rss_post_index} MB (Delta: +{rss_post_index - rss_phase_start:.1f} MB)")
     
-    # Prepare intermediate Tier TSV
-    with open(tiers_tsv, "w", encoding="utf-8", newline="") as f_out:
-        writer = csv.writer(f_out, delimiter="\t")
-        writer.writerow(["source1_entity_id", "exact", "tokens", "char4", "char3", "addr", "scores"])
-        
-    f_tier = open(tiers_tsv, "a", encoding="utf-8", newline="")
-    tier_writer = csv.writer(f_tier, delimiter="\t")
+    # Check for mid-stream resumption
+    skip_s1_count = 0
+    if resume and tiers_tsv.exists():
+        line_count = count_lines_fast(tiers_tsv)
+        if line_count > 1:
+            skip_s1_count = line_count - 1
+            print(f"  [RESUME] Found existing {tiers_tsv.name} with {skip_s1_count:,} S1 rows. Resuming from row {skip_s1_count + 1:,}...")
+            f_tier = open(tiers_tsv, "a", encoding="utf-8", newline="")
+            tier_writer = csv.writer(f_tier, delimiter="\t")
+        else:
+            with open(tiers_tsv, "w", encoding="utf-8", newline="") as f_out:
+                writer = csv.writer(f_out, delimiter="\t")
+                writer.writerow(["source1_entity_id", "exact", "tokens", "char4", "char3", "addr", "scores"])
+            f_tier = open(tiers_tsv, "a", encoding="utf-8", newline="")
+            tier_writer = csv.writer(f_tier, delimiter="\t")
+    else:
+        with open(tiers_tsv, "w", encoding="utf-8", newline="") as f_out:
+            writer = csv.writer(f_out, delimiter="\t")
+            writer.writerow(["source1_entity_id", "exact", "tokens", "char4", "char3", "addr", "scores"])
+        f_tier = open(tiers_tsv, "a", encoding="utf-8", newline="")
+        tier_writer = csv.writer(f_tier, delimiter="\t")
     
-    total_processed = 0
+    total_processed = skip_s1_count
     total_candidates = 0
     total_matches = 0
     batch_records = []
@@ -215,6 +229,7 @@ def process_single_source_phase(
     print(f"\n  [2] Streaming S1 Queries against {source_label.upper()} (Extracting Strategy E representation tiers, Top-K = {top_k_source})...")
     
     global_cand_cache = {}
+    skipped_so_far = 0
     
     try:
         with open(s1_file, "r", encoding="utf-8") as f_in:
@@ -222,6 +237,10 @@ def process_single_source_phase(
             for row in reader:
                 s1_id = row.get("entity_id")
                 if not s1_id:
+                    continue
+                    
+                if skipped_so_far < skip_s1_count:
+                    skipped_so_far += 1
                     continue
                     
                 norm_s1 = normalize_record(row)
@@ -245,7 +264,8 @@ def process_single_source_phase(
                     
                     if time.time() - last_log_time >= 15.0 or (total_processed % 25000 == 0):
                         elapsed = time.time() - t_start
-                        qps = total_processed / max(0.001, elapsed)
+                        processed_since_start = total_processed - skip_s1_count
+                        qps = processed_since_start / max(0.001, elapsed)
                         pct = (total_processed / max(1, total_s1_expected)) * 100
                         remaining_rows = max(0, total_s1_expected - total_processed)
                         eta_sec = remaining_rows / max(0.001, qps)
@@ -253,10 +273,22 @@ def process_single_source_phase(
                         f_tier.flush()
                         disk_mb = tiers_tsv.stat().st_size / (1024 ** 2) if tiers_tsv.exists() else 0.0
                         
+                        # Save in-progress checkpoint
+                        with open(checkpoint_file, "w", encoding="utf-8") as f_cp:
+                            json.dump({
+                                "status": "IN_PROGRESS",
+                                "source": source_label,
+                                "processed_count": total_processed,
+                                "candidates_count": total_candidates,
+                                "matches_count": total_matches,
+                                "intermediate_disk_mb": round(disk_mb, 2),
+                                "timestamp": datetime.now().isoformat()
+                            }, f_cp)
+                        
                         print(
                             f"      [{source_label.upper()}] S1: {total_processed:>9,} / {total_s1_expected:,} ({pct:5.1f}%) | "
                             f"Speed: {qps:6.1f} rows/s | Elapsed: {elapsed:6.1f}s | ETA: {eta_sec/60:5.1f} min | "
-                            f"RSS: {curr_rss:6.1f} MB | Disk: {disk_mb:7.1f} MB | Cands: {total_candidates:,}",
+                            f"RSS: {curr_rss:6.1f} MB | Disk: {disk_mb:7.1f} MB | Cands: {total_candidates:,} | Matches: {total_matches:,}",
                             flush=True
                         )
                         last_log_time = time.time()
@@ -278,6 +310,7 @@ def process_single_source_phase(
                 total_candidates += c_cnt
                 total_matches += m_cnt
                 total_processed += len(batch_records)
+                f_tier.flush()
                 
     finally:
         f_tier.close()
@@ -285,7 +318,7 @@ def process_single_source_phase(
     peak_rss = get_process_memory_mb()
     total_elapsed = time.time() - t_start
     final_disk_mb = tiers_tsv.stat().st_size / (1024 ** 2) if tiers_tsv.exists() else 0.0
-    print(f"\n  [OK] {source_label.upper()} Tier Extraction Finished: {total_processed:,} S1 entities in {total_elapsed:.2f}s ({total_processed/max(0.001, total_elapsed):.1f} S1/s)")
+    print(f"\n  [OK] {source_label.upper()} Tier Extraction Finished: {total_processed:,} S1 entities in {total_elapsed:.2f}s ({(total_processed - skip_s1_count)/max(0.001, total_elapsed):.1f} S1/s)")
     print(f"       Total {source_label.upper()} Candidates: {total_candidates:,} | Peak RSS: {peak_rss:.1f} MB | Intermediate Disk: {final_disk_mb:.1f} MB")
     
     # Save checkpoint
@@ -295,7 +328,7 @@ def process_single_source_phase(
             "source": source_label,
             "processed_count": total_processed,
             "candidates_count": total_candidates,
-            "intermediate_disk_mb": final_disk_mb,
+            "intermediate_disk_mb": round(final_disk_mb, 2),
             "timestamp": datetime.now().isoformat()
         }, f_cp)
 
@@ -607,24 +640,6 @@ def run_production_pipeline(
     )
     
     total_pipeline_time = round(time.time() - t_pipeline_start, 2)
-    
-    # 7. Backup to Persistent Google Drive if available
-    drive_backup_paths = []
-    colab_drive_dir = Path("/content/drive/MyDrive/DATASET_ML-AMAZON/submission")
-    if colab_drive_dir.parent.exists():
-        try:
-            colab_drive_dir.mkdir(parents=True, exist_ok=True)
-            import shutil
-            drive_m = colab_drive_dir / "matching_results.tsv"
-            drive_c = colab_drive_dir / "candidate_pairs.tsv"
-            print(f"\n[BACKUP] Persisting final TSV files to Google Drive ({colab_drive_dir}) ...")
-            shutil.copy2(final_matching_tsv, drive_m)
-            shutil.copy2(final_candidate_tsv, drive_c)
-            drive_backup_paths = [str(drive_m), str(drive_c)]
-            print(f"         [OK] Backed up to Google Drive successfully.")
-        except Exception as e_drive:
-            print(f"         [WARNING] Google Drive backup skipped: {e_drive}")
-
     matching_size_mb = round(final_matching_tsv.stat().st_size / (1024**2), 2)
     candidate_size_mb = round(final_candidate_tsv.stat().st_size / (1024**2), 2)
     
@@ -636,10 +651,11 @@ def run_production_pipeline(
     except Exception:
         pass
 
-    # 8. Run Official Submission Validator
+    # 7. Run Official Submission Validator
     print(f"\n[VALIDATION] Running Official Submission Validator...")
     val_script = REPO_ROOT / "student_resource" / "utils" / "validate_submission.py"
     validator_passed = False
+    validator_output = ""
     
     if val_script.exists() and s1_file is not None:
         res = subprocess.run([
@@ -649,9 +665,10 @@ def run_production_pipeline(
             "--test-dir", str(s1_file.parent)
         ], capture_output=True, text=True)
         
+        validator_output = res.stdout.strip()
         print(f"  Validator Return Code: {res.returncode}")
         print("\n" + "=" * 50 + " OFFICIAL VALIDATOR REPORT " + "=" * 50)
-        print(res.stdout.strip())
+        print(validator_output)
         print("=" * 125)
         
         validator_passed = (res.returncode == 0)
@@ -660,7 +677,113 @@ def run_production_pipeline(
         else:
             print("\n>>> [NOTICE] Validator report output shown above. <<<")
 
-    # 9. Print Full Production Complete Report
+    # 8. Write Production Reports (JSON & Markdown)
+    report_json_path = out_path / "production_report.json"
+    report_md_path = out_path / "production_report.md"
+    
+    report_data = {
+        "git_commit": git_commit_sha,
+        "dataset_paths": {
+            "source1": str(s1_file),
+            "source2": str(s2_file),
+            "source3": str(s3_file)
+        },
+        "records": {
+            "s1_total": merge_stats["total_s1"],
+            "s2_target_records": 4887273,
+            "s3_target_records": 5082316
+        },
+        "memory_rss_mb": {
+            "s2_peak_rss": s2_peak_rss,
+            "s2_post_rss": s2_post_rss,
+            "s3_peak_rss": s3_peak_rss,
+            "s3_post_rss": s3_post_rss,
+            "merge_peak_rss": merge_stats["merge_peak_rss"]
+        },
+        "results": {
+            "candidate_pairs": merge_stats["total_candidates"],
+            "predicted_matches": merge_stats["total_matches"],
+            "singletons": merge_stats["singletons"],
+            "multi_matches": merge_stats["multi_matches"],
+            "zero_matches": merge_stats["zero_matches"],
+            "decision_threshold": tau,
+            "strategy": "Strategy E (Sequential Global Merge, K=50)",
+            "runtime_seconds": total_pipeline_time,
+            "throughput_s1_per_sec": round(merge_stats["total_s1"] / max(0.001, total_pipeline_time), 2)
+        },
+        "outputs": {
+            "matching_results_tsv": str(final_matching_tsv),
+            "candidate_pairs_tsv": str(final_candidate_tsv),
+            "matching_size_mb": matching_size_mb,
+            "candidate_size_mb": candidate_size_mb
+        },
+        "validator_passed": validator_passed,
+        "completed_at": datetime.now().isoformat()
+    }
+    
+    with open(report_json_path, "w", encoding="utf-8") as f_rj:
+        json.dump(report_data, f_rj, indent=2)
+        
+    md_content = f"""# Amazon ML Challenge 2026 — Production Inference Report
+
+- **Status:** {'SUCCESS — VALIDATOR PASSED' if validator_passed else 'COMPLETED'}
+- **Git Commit SHA:** `{git_commit_sha}`
+- **Completed At:** {datetime.now().isoformat()}
+
+## Dataset Scale
+- **Source 1 (Test Queries):** {merge_stats['total_s1']:,} records
+- **Source 2 (Target Records):** 4,887,273 records
+- **Source 3 (Target Records):** 5,082,316 records
+
+## Pipeline Execution & Performance
+- **Total Runtime:** {total_pipeline_time:,.2f} seconds ({total_pipeline_time/3600:.2f} hours)
+- **Overall Throughput:** {merge_stats['total_s1']/max(0.001, total_pipeline_time):.2f} S1 queries / sec
+- **S2 Peak RSS:** {s2_peak_rss:.1f} MB (Freed to {s2_post_rss:.1f} MB)
+- **S3 Peak RSS:** {s3_peak_rss:.1f} MB (Freed to {s3_post_rss:.1f} MB)
+- **Merge Peak RSS:** {merge_stats['merge_peak_rss']:.1f} MB
+
+## Matcher & Submission Statistics
+- **Decision Threshold (tau):** {tau:.2f}
+- **Candidate Pairs Generated:** {merge_stats['total_candidates']:,}
+- **Total Predicted Matches:** {merge_stats['total_matches']:,}
+- **Singleton Matches:** {merge_stats['singletons']:,}
+- **Multi-Match Queries:** {merge_stats['multi_matches']:,}
+- **Zero-Match Queries:** {merge_stats['zero_matches']:,}
+
+## Output Artifacts
+- `matching_results.tsv`: {matching_size_mb:.2f} MB ({merge_stats['total_s1']:,} rows)
+- `candidate_pairs.tsv`: {candidate_size_mb:.2f} MB ({merge_stats['total_s1']:,} rows)
+- **Official Submission Validator:** {'PASSED' if validator_passed else 'FAILED'}
+"""
+    with open(report_md_path, "w", encoding="utf-8") as f_rm:
+        f_rm.write(md_content)
+
+    # 9. Backup to Persistent Google Drive if available
+    drive_backup_paths = []
+    for drive_dir_candidate in [
+        Path("/content/drive/MyDrive/DATASET_ML-AMAZON/final_submission"),
+        Path("/content/drive/MyDrive/DATASET_ML-AMAZON/submission")
+    ]:
+        if drive_dir_candidate.parent.exists():
+            try:
+                drive_dir_candidate.mkdir(parents=True, exist_ok=True)
+                import shutil
+                drive_m = drive_dir_candidate / "matching_results.tsv"
+                drive_c = drive_dir_candidate / "candidate_pairs.tsv"
+                drive_rj = drive_dir_candidate / "production_report.json"
+                drive_rm = drive_dir_candidate / "production_report.md"
+                print(f"\n[BACKUP] Persisting final artifacts to Google Drive ({drive_dir_candidate}) ...")
+                shutil.copy2(final_matching_tsv, drive_m)
+                shutil.copy2(final_candidate_tsv, drive_c)
+                shutil.copy2(report_json_path, drive_rj)
+                shutil.copy2(report_md_path, drive_rm)
+                drive_backup_paths = [str(drive_m), str(drive_c), str(drive_rj), str(drive_rm)]
+                print(f"         [OK] Backed up to Google Drive successfully.")
+                break
+            except Exception as e_drive:
+                print(f"         [WARNING] Google Drive backup skipped: {e_drive}")
+
+    # 10. Print Full Production Complete Report
     print("\n" + "=" * 95)
     print("FULL PRODUCTION COMPLETE")
     print("=" * 95)
@@ -717,6 +840,8 @@ def run_production_pipeline(
         "merge_peak_rss": merge_stats["merge_peak_rss"],
         "matching_tsv": str(final_matching_tsv),
         "candidate_tsv": str(final_candidate_tsv),
+        "report_json": str(report_json_path),
+        "report_md": str(report_md_path),
         "drive_backup_paths": drive_backup_paths,
         "git_commit": git_commit_sha
     }
