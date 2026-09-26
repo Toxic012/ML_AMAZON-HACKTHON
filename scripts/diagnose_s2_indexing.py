@@ -83,7 +83,7 @@ def run_sequential_read_diagnostic(file_path: Path, limit: Optional[int] = None,
     print("=" * 80 + "\n")
 
 
-def run_controlled_subset_benchmarks(file_path: Path, subsets=[10000, 50000, 100000, 250000]):
+def run_controlled_subset_benchmarks(file_path: Path, subsets=[10000, 50000, 100000, 250000, 1000000]):
     """
     Test E: Indexing benchmark across controlled subset sizes.
     """

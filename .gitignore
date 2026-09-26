@@ -1,6 +1,8 @@
 # Challenge datasets
 student_resource/dataset/
 student_resource/sample_dataset/
+.local_dataset_cache/
+amazon_ml_dataset/
 
 # Large archives
 *.zip

@@ -65,12 +65,12 @@ def _seq_sim(s1: str, s2: str) -> float:
 
 
 try:
-    from .normalization import extract_postal_tokens
+    from .normalization import extract_postal_tokens, char_ngrams, tokenize
 except Exception:
     try:
-        from src.normalization import extract_postal_tokens
+        from src.normalization import extract_postal_tokens, char_ngrams, tokenize
     except Exception:
-        from normalization import extract_postal_tokens
+        from normalization import extract_postal_tokens, char_ngrams, tokenize
 
 
 def compute_pairwise_features(s1_record: Dict[str, Any], cand_record: Any, cand_id: Optional[str] = None) -> List[float]:
@@ -97,23 +97,11 @@ def compute_pairwise_features(s1_record: Dict[str, Any], cand_record: Any, cand_
         c_country = (cand_record[2] or "").strip().upper()
         cid = cand_id or (cand_record[3] if len(cand_record) > 3 else "")
         
-        c_n_tok = set(c_name.split()) if c_name else set()
-        clean_c_name = "".join(c_n_tok)
-        if not clean_c_name:
-            c_c3, c_c4 = set(), set()
-        elif len(clean_c_name) <= 3:
-            c_c3 = {clean_c_name}
-            c_c4 = {clean_c_name}
-        elif len(clean_c_name) == 4:
-            c_c3 = {clean_c_name[i:i+3] for i in range(2)}
-            c_c4 = {clean_c_name}
-        else:
-            len_clean = len(clean_c_name)
-            c_c3 = {clean_c_name[i:i+3] for i in range(len_clean - 2)}
-            c_c4 = {clean_c_name[i:i+4] for i in range(len_clean - 3)}
-            
-        c_a_tok = set(c_addr.split()) if c_addr else set()
-        c_postal = extract_postal_tokens(c_addr) if c_addr else set()
+        c_n_tok = tokenize(c_name)
+        c_c3 = char_ngrams(c_name, n=3)
+        c_c4 = char_ngrams(c_name, n=4)
+        c_a_tok = tokenize(c_addr)
+        c_postal = extract_postal_tokens(c_addr)
     else:
         c_name = cand_record.get("norm_name", "")
         c_n_tok = cand_record.get("name_tokens", set())
