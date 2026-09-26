@@ -141,6 +141,44 @@ def print_dataset_diagnostics(resolved_paths: Dict[str, Optional[Path]]):
     print("=" * 80)
 
 
+def stage_test_files_locally(resolved_paths: Dict[str, Optional[Path]], target_dir: Optional[Path] = None) -> Dict[str, Optional[Path]]:
+    """
+    Optionally stages test TSV files from slow mounts (e.g. Google Drive /content/drive/...)
+    to fast local disk (/content/amazon_ml_dataset/ or target_dir) to avoid FUSE latency and connection drops.
+    Returns updated resolved_paths pointing to local files.
+    """
+    import shutil
+    import time
+    
+    if target_dir is None:
+        if Path("/content").exists():
+            target_dir = Path("/content/amazon_ml_dataset")
+        else:
+            target_dir = BASE_DIR / ".local_dataset_cache"
+            
+    target_dir.mkdir(parents=True, exist_ok=True)
+    staged_paths = dict(resolved_paths)
+    
+    test_keys = ["test_source1", "test_source2", "test_source3"]
+    print(f"\n[LOCAL STAGING] Staging test files to local high-speed disk: {target_dir} ...")
+    
+    for k in test_keys:
+        src = resolved_paths.get(k)
+        if src and src.exists():
+            dst = target_dir / src.name
+            if dst.exists() and dst.stat().st_size == src.stat().st_size:
+                print(f"  - {k}: already staged: {dst} ({dst.stat().st_size / (1024**2):.2f} MB)")
+            else:
+                t0 = time.time()
+                print(f"  - Copying {src.name} ({src.stat().st_size / (1024**2):.2f} MB) -> {dst} ...", end="", flush=True)
+                shutil.copyfile(src, dst)
+                print(f" done in {time.time() - t0:.2f}s")
+            staged_paths[k] = dst
+            
+    staged_paths["data_dir"] = target_dir
+    return staged_paths
+
+
 DATA_DIR = get_dataset_dir()
 OUTPUT_DIR = BASE_DIR / "output"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)

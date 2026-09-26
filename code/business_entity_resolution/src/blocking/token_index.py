@@ -1,6 +1,14 @@
 from collections import defaultdict
 from typing import Dict, List, Set, Optional, Tuple, Any
 
+try:
+    from ..normalization import extract_postal_tokens
+except Exception:
+    try:
+        from src.normalization import extract_postal_tokens
+    except Exception:
+        from normalization import extract_postal_tokens
+
 BUSINESS_STOPWORDS = {
     "inc", "incorporated", "llc", "ltd", "limited", "corp", "corporation",
     "co", "company", "services", "service", "solutions", "solution",
@@ -53,6 +61,66 @@ class InvertedTokenIndex:
         self.addr_doc_freq: Dict[str, int] = defaultdict(int)
         
         self.total_records = 0
+
+    def add_compact_record(self, eid: str, norm_name: str, norm_addr: str, country: str):
+        """High-speed memory-safe indexer avoiding intermediate dictionary & set expansion."""
+        if not eid:
+            return
+            
+        c = country.strip().upper() if country else ""
+        self.total_records += 1
+        
+        # 1. Exact normalized name
+        if norm_name:
+            if c:
+                self.country_exact_index[c][norm_name].append(eid)
+            self.global_exact_index[norm_name].append(eid)
+            
+        # 2. Word tokens
+        name_toks = norm_name.split()
+        for token in set(name_toks):
+            if len(token) > 1 and token not in BUSINESS_STOPWORDS:
+                self.token_doc_freq[token] += 1
+                if c:
+                    self.country_token_index[c][token].append(eid)
+                self.global_token_index[token].append(eid)
+                
+        # 3. Char 3-grams & 4-grams
+        clean_name = "".join(name_toks)
+        if clean_name:
+            if len(clean_name) <= 3:
+                g3_set = {clean_name}
+            else:
+                g3_set = {clean_name[i:i+3] for i in range(len(clean_name) - 2)}
+            for g3 in g3_set:
+                self.char3_doc_freq[g3] += 1
+                if c:
+                    self.country_char3_index[c][g3].append(eid)
+                self.global_char3_index[g3].append(eid)
+                
+            if len(clean_name) <= 4:
+                g4_set = {clean_name}
+            else:
+                g4_set = {clean_name[i:i+4] for i in range(len(clean_name) - 3)}
+            for g4 in g4_set:
+                self.char4_doc_freq[g4] += 1
+                if c:
+                    self.country_char4_index[c][g4].append(eid)
+                self.global_char4_index[g4].append(eid)
+                
+        # 4. Address & Postal tokens
+        if norm_addr:
+            postal_tokens = extract_postal_tokens(norm_addr)
+            addr_tokens = set(norm_addr.split())
+            all_addr = set(postal_tokens)
+            for at in addr_tokens:
+                if len(at) >= 3 and at not in ADDRESS_STOPWORDS:
+                    all_addr.add(at)
+            for t in all_addr:
+                self.addr_doc_freq[t] += 1
+                if c:
+                    self.country_addr_index[c][t].append(eid)
+                self.global_addr_index[t].append(eid)
 
     def add_record(self, record: dict):
         eid = record.get("entity_id")

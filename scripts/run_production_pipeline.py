@@ -36,15 +36,15 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 try:
-    from src.config import get_dataset_dir, resolve_dataset_paths, print_dataset_diagnostics, EXPERIMENTS_DIR, BASE_DIR
-    from src.normalization import normalize_record
+    from src.config import get_dataset_dir, resolve_dataset_paths, print_dataset_diagnostics, stage_test_files_locally, EXPERIMENTS_DIR, BASE_DIR
+    from src.normalization import normalize_record, normalize_text
     from src.blocking.token_index import InvertedTokenIndex
     from src.blocking.strategies import block_hybrid_full_union
     from src.features import compute_pairwise_features
     from src.matching.matcher import EntityMatcher
 except ImportError:
-    from code.business_entity_resolution.src.config import get_dataset_dir, resolve_dataset_paths, print_dataset_diagnostics, EXPERIMENTS_DIR, BASE_DIR
-    from code.business_entity_resolution.src.normalization import normalize_record
+    from code.business_entity_resolution.src.config import get_dataset_dir, resolve_dataset_paths, print_dataset_diagnostics, stage_test_files_locally, EXPERIMENTS_DIR, BASE_DIR
+    from code.business_entity_resolution.src.normalization import normalize_record, normalize_text
     from code.business_entity_resolution.src.blocking.token_index import InvertedTokenIndex
     from code.business_entity_resolution.src.blocking.strategies import block_hybrid_full_union
     from code.business_entity_resolution.src.features import compute_pairwise_features
@@ -59,28 +59,46 @@ def get_process_memory_mb() -> float:
         return 0.0
 
 
-def stream_compact_index(source_path: Path, max_token_freq: int = 5000, limit: Optional[int] = None):
+def stream_compact_index(source_path: Path, max_token_freq: int = 5000, limit: Optional[int] = None, log_every: int = 250000):
     """
     Streams a target TSV (S2/S3) and builds:
     1. Inverted index for fast candidate retrieval
-    2. Compact dictionary of records for fast feature extraction
+    2. Compact tuple dictionary (norm_name, norm_addr, country) for fast feature extraction
+    With periodic diagnostic progress logging every log_every records.
     """
     index = InvertedTokenIndex(max_token_freq=max_token_freq)
-    target_store: Dict[str, dict] = {}
+    target_store: Dict[str, Tuple[str, str, str]] = {}
     
     t0 = time.time()
+    t_last = t0
     count = 0
+    source_name = source_path.name
     with open(source_path, "r", encoding="utf-8") as f:
         reader = csv.DictReader(f, delimiter="\t")
         for row in reader:
             eid = row.get("entity_id")
             if not eid:
                 continue
-            norm_r = normalize_record(row)
-            index.add_record(norm_r)
-            # Store normalized record
-            target_store[eid] = norm_r
+            name = row.get("business_name", "")
+            addr = row.get("business_address", "")
+            country = row.get("country", "").strip().upper()
+            norm_name = normalize_text(name)
+            norm_addr = normalize_text(addr)
+            
+            index.add_compact_record(eid, norm_name, norm_addr, country)
+            target_store[eid] = (norm_name, norm_addr, country)
             count += 1
+            
+            if count % log_every == 0:
+                now = time.time()
+                elapsed = now - t0
+                step_elapsed = now - t_last
+                step_rate = log_every / max(0.001, step_elapsed)
+                avg_rate = count / max(0.001, elapsed)
+                rss = get_process_memory_mb()
+                print(f"    [{source_name} INDEX] rows={count:>9,} | elapsed={elapsed:6.1f}s | step_rate={step_rate:>7,.0f} rows/s | avg_rate={avg_rate:>7,.0f} rows/s | RSS={rss:6.1f} MB")
+                t_last = now
+                
             if limit and count >= limit:
                 break
                 
@@ -97,6 +115,7 @@ def run_production_pipeline(
     batch_size: int = 2000,
     s1_limit: Optional[int] = None,
     target_limit: Optional[int] = None,
+    stage_local: bool = True,
     resume: bool = True
 ):
     print("=" * 95)
@@ -108,6 +127,10 @@ def run_production_pipeline(
     # 1. Resolve Dataset Paths with Diagnostics
     resolved_paths = resolve_dataset_paths(data_dir)
     print_dataset_diagnostics(resolved_paths)
+    
+    # Optionally stage test files to local Colab NVMe / fast disk to avoid Drive FUSE latency
+    if stage_local:
+        resolved_paths = stage_test_files_locally(resolved_paths)
     
     s1_file = resolved_paths.get("test_source1")
     s2_file = resolved_paths.get("test_source2")
@@ -350,7 +373,7 @@ def process_s1_batch(
             for cid in cands:
                 c_rec = target_store.get(cid)
                 if c_rec is not None:
-                    pair_feats.append(compute_pairwise_features(s1_rec, c_rec))
+                    pair_feats.append(compute_pairwise_features(s1_rec, c_rec, cand_id=cid))
                     valid_cands.append(cid)
                     
             if pair_feats:
@@ -382,6 +405,7 @@ def main():
     parser.add_argument("--batch-size", type=int, default=2000, help="Batch size for S1 processing")
     parser.add_argument("--s1-limit", type=int, default=None, help="Limit S1 queries for test runs")
     parser.add_argument("--target-limit", type=int, default=None, help="Limit target records for test runs")
+    parser.add_argument("--no-stage-local", action="store_true", help="Disable staging files to local fast disk")
     parser.add_argument("--no-resume", action="store_true", help="Start fresh without resuming")
     
     args = parser.parse_args()
@@ -395,6 +419,7 @@ def main():
         batch_size=args.batch_size,
         s1_limit=args.s1_limit,
         target_limit=args.target_limit,
+        stage_local=not args.no_stage_local,
         resume=not args.no_resume
     )
 
