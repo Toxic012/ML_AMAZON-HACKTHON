@@ -82,6 +82,7 @@ def normalize_record(row: Dict[str, Any]) -> Dict[str, Any]:
     row["char_3grams"] = char_ngrams(norm_name, n=3)
     row["char_4grams"] = char_ngrams(norm_name, n=4)
     row["postal_tokens"] = extract_postal_tokens(b_addr) if b_addr else set()
+    row["comb_tokens"] = row["name_tokens"] | row["addr_tokens"]
     
     return row
 

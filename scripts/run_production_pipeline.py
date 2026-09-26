@@ -61,7 +61,7 @@ try:
         extract_source_tiers,
         merge_strategy_e_tiers
     )
-    from src.features import compute_pairwise_features
+    from src.features import compute_pairwise_features, PreprocessedCandidate
     from src.matching.matcher import EntityMatcher
 except ImportError:
     from code.business_entity_resolution.src.config import (
@@ -75,7 +75,7 @@ except ImportError:
     from code.business_entity_resolution.src.normalization import normalize_record, normalize_text
     from code.business_entity_resolution.src.blocking.token_index import InvertedTokenIndex
     from code.business_entity_resolution.src.blocking.strategies import block_hybrid_single_source
-    from code.business_entity_resolution.src.features import compute_pairwise_features
+    from code.business_entity_resolution.src.features import compute_pairwise_features, PreprocessedCandidate
     from code.business_entity_resolution.src.matching.matcher import EntityMatcher
 
 
@@ -140,6 +140,9 @@ def stream_compact_index(source_path: Path, max_token_freq: int = 5000, limit: O
             if limit and count >= limit:
                 break
                 
+    if hasattr(index, "build_weights"):
+        index.build_weights()
+        
     elapsed = round(time.time() - t0, 2)
     return index, target_store, count, elapsed
 
@@ -320,8 +323,7 @@ def _process_source_batch_exact(
     total_matches = 0
     
     batch_tiers = []
-    all_features = []
-    s1_cand_ranges = []
+    batch_unique_cids = set()
     
     for s1_rec in batch_s1:
         exact, toks, g4, g3, addr = extract_source_tiers(s1_rec, target_index, top_k=top_k_source)
@@ -336,12 +338,19 @@ def _process_source_batch_exact(
                     unique_cands.append(cid)
                     
         total_cands += len(unique_cands)
-        batch_tiers.append((s1_rec["entity_id"], exact, toks, g4, g3, addr, unique_cands))
+        batch_unique_cids.update(unique_cands)
+        batch_tiers.append((s1_rec["entity_id"], s1_rec, exact, toks, g4, g3, addr, unique_cands))
         
+    # Pre-cache unique candidate representations for the batch
+    cand_cache = {cid: PreprocessedCandidate(target_store[cid], cid) for cid in batch_unique_cids}
+    
+    all_features = []
+    s1_cand_ranges = []
+    for s1_id, s1_rec, exact, toks, g4, g3, addr, unique_cands in batch_tiers:
         start_idx = len(all_features)
         if unique_cands:
             for cid in unique_cands:
-                all_features.append(compute_pairwise_features(s1_rec, target_store[cid], cand_id=cid))
+                all_features.append(compute_pairwise_features(s1_rec, cand_cache[cid]))
         end_idx = len(all_features)
         s1_cand_ranges.append((start_idx, end_idx))
         
@@ -352,7 +361,7 @@ def _process_source_batch_exact(
             warnings.simplefilter("ignore", category=UserWarning)
             all_probas = matcher.predict_proba(X_batch)
             
-    for (s1_id, exact, toks, g4, g3, addr, unique_cands), (start_idx, end_idx) in zip(batch_tiers, s1_cand_ranges):
+    for (s1_id, s1_rec, exact, toks, g4, g3, addr, unique_cands), (start_idx, end_idx) in zip(batch_tiers, s1_cand_ranges):
         scores_map = {}
         if unique_cands:
             c_probas = all_probas[start_idx:end_idx]

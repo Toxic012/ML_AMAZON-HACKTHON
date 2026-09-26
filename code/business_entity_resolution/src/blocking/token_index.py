@@ -179,22 +179,30 @@ class InvertedTokenIndex:
                 self.country_addr_index[country][t].append(eid)
             self.global_addr_index[t].append(eid)
 
+    def build_weights(self):
+        """Precomputes frequency weights across all sub-indexes for maximum query throughput."""
+        self.token_weights = {t: 1.0 / (1.0 + 0.1 * max(1, df)) for t, df in self.token_doc_freq.items()}
+        self.char3_weights = {g: 1.0 / (1.0 + 0.05 * max(1, df)) for g, df in self.char3_doc_freq.items()}
+        self.char4_weights = {g: 1.0 / (1.0 + 0.05 * max(1, df)) for g, df in self.char4_doc_freq.items()}
+        self.addr_weights = {t: 1.0 / (1.0 + 0.1 * max(1, df)) for t, df in self.addr_doc_freq.items()}
+        self.postal_weights = {pt: 3.0 / (1.0 + 0.05 * max(1, df)) for pt, df in self.addr_doc_freq.items()}
+
     def search_exact(self, country: str, norm_name: str) -> List[str]:
         if not norm_name:
             return []
-        country = country.strip().upper() if country else ""
-        if country and country in self.country_exact_index:
-            cands = self.country_exact_index[country].get(norm_name, [])
-            if cands:
-                return list(cands)
-        return list(self.global_exact_index.get(norm_name, []))
+        c = country.strip().upper() if country else ""
+        if c and c in self.country_exact_index:
+            cands = self.country_exact_index[c].get(norm_name, None)
+            if cands is not None:
+                return cands
+        return self.global_exact_index.get(norm_name, [])
 
     def search_tokens(self, country: str, tokens: Set[str], min_overlap: int = 1, top_k: int = 50) -> List[str]:
         if not tokens:
             return []
             
-        country = country.strip().upper() if country else ""
-        token_map = self.country_token_index.get(country) if country in self.country_token_index else self.global_token_index
+        c = country.strip().upper() if country else ""
+        token_map = self.country_token_index.get(c) if c in self.country_token_index else self.global_token_index
         
         # Filter tokens by frequency threshold
         valid_tokens = [
@@ -208,12 +216,12 @@ class InvertedTokenIndex:
                 key=lambda x: self.token_doc_freq.get(x, float('inf'))
             )[:2]
 
-        candidate_scores = defaultdict(float)
+        candidate_scores = {}
+        t_weights = getattr(self, "token_weights", None)
         for t in valid_tokens:
-            doc_f = max(1, self.token_doc_freq.get(t, 1))
-            weight = 1.0 / (1.0 + 0.1 * doc_f)
+            w = t_weights[t] if t_weights and t in t_weights else (1.0 / (1.0 + 0.1 * max(1, self.token_doc_freq.get(t, 1))))
             for eid in token_map[t]:
-                candidate_scores[eid] += weight
+                candidate_scores[eid] = candidate_scores.get(eid, 0.0) + w
 
         if not candidate_scores:
             return []
@@ -228,13 +236,15 @@ class InvertedTokenIndex:
         if not ngrams:
             return []
             
-        country = country.strip().upper() if country else ""
+        c = country.strip().upper() if country else ""
         if n == 3:
-            ngram_map = self.country_char3_index.get(country) if country in self.country_char3_index else self.global_char3_index
+            ngram_map = self.country_char3_index.get(c) if c in self.country_char3_index else self.global_char3_index
             doc_freq_map = self.char3_doc_freq
+            weights_map = getattr(self, "char3_weights", None)
         else:
-            ngram_map = self.country_char4_index.get(country) if country in self.country_char4_index else self.global_char4_index
+            ngram_map = self.country_char4_index.get(c) if c in self.country_char4_index else self.global_char4_index
             doc_freq_map = self.char4_doc_freq
+            weights_map = getattr(self, "char4_weights", None)
             
         valid_ngrams = [
             g for g in ngrams
@@ -247,12 +257,11 @@ class InvertedTokenIndex:
                 key=lambda x: doc_freq_map.get(x, float('inf'))
             )[:4]
             
-        candidate_scores = defaultdict(float)
+        candidate_scores = {}
         for g in valid_ngrams:
-            df = max(1, doc_freq_map.get(g, 1))
-            weight = 1.0 / (1.0 + 0.05 * df)
+            w = weights_map[g] if weights_map and g in weights_map else (1.0 / (1.0 + 0.05 * max(1, doc_freq_map.get(g, 1))))
             for eid in ngram_map[g]:
-                candidate_scores[eid] += weight
+                candidate_scores[eid] = candidate_scores.get(eid, 0.0) + w
                 
         if not candidate_scores:
             return []
@@ -268,18 +277,19 @@ class InvertedTokenIndex:
         if not addr_tokens and not postal_tokens:
             return []
             
-        country = country.strip().upper() if country else ""
-        addr_map = self.country_addr_index.get(country) if country in self.country_addr_index else self.global_addr_index
+        c = country.strip().upper() if country else ""
+        addr_map = self.country_addr_index.get(c) if c in self.country_addr_index else self.global_addr_index
         
-        candidate_scores = defaultdict(float)
+        candidate_scores = {}
+        p_weights = getattr(self, "postal_weights", None)
+        a_weights = getattr(self, "addr_weights", None)
         
         # High weight for postal codes (e.g. 3.0 per matching postal code)
         for pt in postal_tokens:
             if pt in addr_map:
-                df = max(1, self.addr_doc_freq.get(pt, 1))
-                weight = 3.0 / (1.0 + 0.05 * df)
+                w = p_weights[pt] if p_weights and pt in p_weights else (3.0 / (1.0 + 0.05 * max(1, self.addr_doc_freq.get(pt, 1))))
                 for eid in addr_map[pt]:
-                    candidate_scores[eid] += weight
+                    candidate_scores[eid] = candidate_scores.get(eid, 0.0) + w
                     
         # Weight for general address tokens
         valid_addr_tokens = [
@@ -288,10 +298,9 @@ class InvertedTokenIndex:
         ]
         
         for at in valid_addr_tokens:
-            df = max(1, self.addr_doc_freq.get(at, 1))
-            weight = 1.0 / (1.0 + 0.1 * df)
+            w = a_weights[at] if a_weights and at in a_weights else (1.0 / (1.0 + 0.1 * max(1, self.addr_doc_freq.get(at, 1))))
             for eid in addr_map[at]:
-                candidate_scores[eid] += weight
+                candidate_scores[eid] = candidate_scores.get(eid, 0.0) + w
                 
         if not candidate_scores:
             return []

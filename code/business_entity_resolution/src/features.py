@@ -43,7 +43,7 @@ def _jaccard(set1: Set[str], set2: Set[str]) -> float:
     inter = len(set1 & set2)
     if inter == 0:
         return 0.0
-    union = len(set1 | set2)
+    union = len(set1) + len(set2) - inter
     return inter / union if union > 0 else 0.0
 
 
@@ -60,8 +60,19 @@ def _seq_sim(s1: str, s2: str) -> float:
         return 0.0
     if s1 == s2:
         return 1.0
-    # Fast SequenceMatcher ratio
-    return SequenceMatcher(None, s1, s2).quick_ratio()
+    len1 = len(s1)
+    len2 = len(s2)
+    # Fast character count matching 100% numerically identical to difflib.SequenceMatcher.quick_ratio()
+    counts = {}
+    for c in s2:
+        counts[c] = counts.get(c, 0) + 1
+    matches = 0
+    for c in s1:
+        n = counts.get(c, 0)
+        if n > 0:
+            matches += 1
+            counts[c] = n - 1
+    return 2.0 * matches / (len1 + len2)
 
 
 try:
@@ -73,11 +84,55 @@ except Exception:
         from normalization import extract_postal_tokens, char_ngrams, tokenize
 
 
+class PreprocessedCandidate:
+    """
+    Compact slotted object for cached candidate record representation.
+    Avoids repetitive tokenization, n-gram extraction, and dictionary allocations.
+    """
+    __slots__ = (
+        'norm_name', 'norm_addr', 'country', 'cid',
+        'name_tokens', 'char_3grams', 'char_4grams',
+        'addr_tokens', 'postal_tokens', 'comb_tokens',
+        'len_name', 'is_s2', 'is_s3'
+    )
+    def __init__(self, raw_record: Any, cid: Optional[str] = None):
+        if isinstance(raw_record, tuple):
+            c_name = raw_record[0] or ""
+            c_addr = raw_record[1] or ""
+            c_country = (raw_record[2] or "").strip().upper()
+            cand_id = cid or (raw_record[3] if len(raw_record) > 3 else "")
+        elif isinstance(raw_record, dict):
+            c_name = raw_record.get("norm_name", "")
+            c_addr = raw_record.get("norm_addr", "")
+            c_country = (raw_record.get("country", "") or "").strip().upper()
+            cand_id = cid or raw_record.get("entity_id", "")
+        else:
+            c_name = getattr(raw_record, "norm_name", "")
+            c_addr = getattr(raw_record, "norm_addr", "")
+            c_country = getattr(raw_record, "country", "").strip().upper()
+            cand_id = cid or getattr(raw_record, "entity_id", "")
+            
+        self.norm_name = c_name
+        self.norm_addr = c_addr
+        self.country = c_country
+        self.cid = cand_id
+        
+        self.name_tokens = tokenize(c_name)
+        self.char_3grams = char_ngrams(c_name, n=3)
+        self.char_4grams = char_ngrams(c_name, n=4)
+        self.addr_tokens = tokenize(c_addr)
+        self.postal_tokens = extract_postal_tokens(c_addr)
+        self.comb_tokens = self.name_tokens | self.addr_tokens
+        self.len_name = len(c_name)
+        self.is_s2 = 1.0 if (cand_id and cand_id.startswith("S2-")) else 0.0
+        self.is_s3 = 1.0 if (cand_id and cand_id.startswith("S3-")) else 0.0
+
+
 def compute_pairwise_features(s1_record: Dict[str, Any], cand_record: Any, cand_id: Optional[str] = None) -> List[float]:
     """
     Computes a 25-dimensional numeric feature vector for a candidate pair (s1, candidate).
     Vectorized and optimized for high-throughput inference (sub-millisecond per pair).
-    Supports both rich dict and compact tuple (norm_name, norm_addr, country) records.
+    Supports PreprocessedCandidate, compact tuples, and rich dicts.
     """
     # Name fields
     s1_name = s1_record.get("norm_name", "")
@@ -90,8 +145,24 @@ def compute_pairwise_features(s1_record: Dict[str, Any], cand_record: Any, cand_
     s1_a_tok = s1_record.get("addr_tokens", set())
     s1_postal = s1_record.get("postal_tokens", set())
     s1_country = s1_record.get("country", "").strip().upper()
+    comb_s1 = s1_record.get("comb_tokens")
+    if comb_s1 is None:
+        comb_s1 = s1_n_tok | s1_a_tok
 
-    if isinstance(cand_record, tuple):
+    if isinstance(cand_record, PreprocessedCandidate):
+        c_name = cand_record.norm_name
+        c_addr = cand_record.norm_addr
+        c_country = cand_record.country
+        c_n_tok = cand_record.name_tokens
+        c_c3 = cand_record.char_3grams
+        c_c4 = cand_record.char_4grams
+        c_a_tok = cand_record.addr_tokens
+        c_postal = cand_record.postal_tokens
+        comb_c = cand_record.comb_tokens
+        len_c = cand_record.len_name
+        is_s2 = cand_record.is_s2
+        is_s3 = cand_record.is_s3
+    elif isinstance(cand_record, tuple):
         c_name = cand_record[0] or ""
         c_addr = cand_record[1] or ""
         c_country = (cand_record[2] or "").strip().upper()
@@ -102,6 +173,10 @@ def compute_pairwise_features(s1_record: Dict[str, Any], cand_record: Any, cand_
         c_c4 = char_ngrams(c_name, n=4)
         c_a_tok = tokenize(c_addr)
         c_postal = extract_postal_tokens(c_addr)
+        comb_c = c_n_tok | c_a_tok
+        len_c = len(c_name)
+        is_s2 = 1.0 if (cid and cid.startswith("S2-")) else 0.0
+        is_s3 = 1.0 if (cid and cid.startswith("S3-")) else 0.0
     else:
         c_name = cand_record.get("norm_name", "")
         c_n_tok = cand_record.get("name_tokens", set())
@@ -112,6 +187,10 @@ def compute_pairwise_features(s1_record: Dict[str, Any], cand_record: Any, cand_
         c_postal = cand_record.get("postal_tokens", set())
         c_country = cand_record.get("country", "").strip().upper()
         cid = cand_id or cand_record.get("entity_id", "")
+        comb_c = c_n_tok | c_a_tok
+        len_c = len(c_name)
+        is_s2 = 1.0 if (cid and cid.startswith("S2-")) else 0.0
+        is_s3 = 1.0 if (cid and cid.startswith("S3-")) else 0.0
     
     # Name features
     name_exact = 1.0 if (s1_name and s1_name == c_name) else 0.0
@@ -121,7 +200,7 @@ def compute_pairwise_features(s1_record: Dict[str, Any], cand_record: Any, cand_
     name_c3_jaccard = _jaccard(s1_c3, c_c3)
     name_c4_jaccard = _jaccard(s1_c4, c_c4)
     name_seq_sim = _seq_sim(s1_name, c_name)
-    len_s1, len_c = len(s1_name), len(c_name)
+    len_s1 = len(s1_name)
     name_len_diff = float(abs(len_s1 - len_c))
     name_len_ratio = (min(len_s1, len_c) / max(1, max(len_s1, len_c))) if (len_s1 > 0 and len_c > 0) else 0.0
     name_tok_count_diff = float(abs(len(s1_n_tok) - len(c_n_tok)))
@@ -142,13 +221,7 @@ def compute_pairwise_features(s1_record: Dict[str, Any], cand_record: Any, cand_
     
     # Cross-field & Origin features
     country_match = 1.0 if (s1_country == c_country or not s1_country or not c_country) else 0.0
-    
-    comb_s1 = s1_n_tok | s1_a_tok
-    comb_c = c_n_tok | c_a_tok
     combined_tok_jaccard = _jaccard(comb_s1, comb_c)
-    
-    is_s2 = 1.0 if (cid and cid.startswith("S2-")) else 0.0
-    is_s3 = 1.0 if (cid and cid.startswith("S3-")) else 0.0
     
     return [
         name_exact,
