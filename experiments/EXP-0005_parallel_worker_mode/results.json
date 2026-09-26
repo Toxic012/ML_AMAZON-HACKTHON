@@ -1,0 +1,77 @@
+{
+  "experiment_id": "EXP-0005",
+  "experiment_name": "3-Worker Parallel Production Inference Mode",
+  "exact_equivalence_verification": {
+    "s1_queries": 2000,
+    "target_slice": "50000 records per target source",
+    "candidate_set_equality_pct": 100.0,
+    "candidate_mean_jaccard_pct": 100.0,
+    "match_decision_equality_pct": 100.0,
+    "changed_decisions": 0,
+    "validator_passed": true
+  },
+  "worker_scaling_benchmark": {
+    "1_worker": {
+      "num_workers": 1,
+      "query_count": 2000,
+      "per_worker_queries": [
+        2000
+      ],
+      "total_runtime_seconds": 133.63,
+      "parallel_wall_clock_seconds": 133.63,
+      "throughput_s1_per_sec": 14.97,
+      "speedup": 1.0
+    },
+    "2_workers": {
+      "num_workers": 2,
+      "query_count": 2000,
+      "per_worker_queries": [
+        1000,
+        1000
+      ],
+      "worker_times_seconds": [
+        70.61,
+        62.98
+      ],
+      "parallel_wall_clock_seconds": 70.61,
+      "throughput_s1_per_sec": 28.33,
+      "speedup": 1.89
+    },
+    "3_workers": {
+      "num_workers": 3,
+      "query_count": 2000,
+      "per_worker_queries": [
+        667,
+        667,
+        666
+      ],
+      "worker_times_seconds": [
+        57.3,
+        58.89,
+        56.67
+      ],
+      "parallel_wall_clock_seconds": 58.89,
+      "throughput_s1_per_sec": 33.96,
+      "speedup": 2.27
+    },
+    "4_workers": {
+      "num_workers": 4,
+      "query_count": 2000,
+      "per_worker_queries": [
+        500,
+        500,
+        500,
+        500
+      ],
+      "worker_times_seconds": [
+        29.85,
+        30.87,
+        49.72,
+        47.54
+      ],
+      "parallel_wall_clock_seconds": 49.72,
+      "throughput_s1_per_sec": 40.22,
+      "speedup": 2.69
+    }
+  }
+}

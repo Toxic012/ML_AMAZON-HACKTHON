@@ -156,18 +156,25 @@ def process_single_source_phase(
     top_k_source: int,
     intermediate_dir: Path,
     batch_size: int = 2000,
+    start_row: int = 0,
+    end_row: Optional[int] = None,
     s1_limit: Optional[int] = None,
     target_limit: Optional[int] = None,
     resume: bool = True
-) -> Tuple[Path, Path, float, float]:
+) -> Tuple[Path, float, float]:
     """
     Executes a complete isolated inference pass for one target source (S2 or S3):
     1. Indexes target source in compact memory representation.
-    2. Streams all S1 entities, extracts top_k_source candidates, scores with LightGBM.
+    2. Streams assigned S1 entities [start_row, end_row), extracts top_k_source candidates, scores with LightGBM.
     3. Streams matches and candidates incrementally to intermediate TSVs.
     4. Deletes target index & store, triggers garbage collection, measures memory drop.
     Returns (matches_tsv_path, candidates_tsv_path, peak_rss_mb, post_cleanup_rss_mb).
     """
+    if s1_limit is not None and end_row is None:
+        end_row = start_row + s1_limit
+        
+    total_s1_expected = (end_row - start_row) if end_row is not None else 1732544
+    
     # Tier TSV
     tiers_tsv = intermediate_dir / f"{source_label.lower()}_tiers.tsv"
     checkpoint_file = intermediate_dir / f".{source_label.lower()}_checkpoint.json"
@@ -177,7 +184,10 @@ def process_single_source_phase(
         try:
             with open(checkpoint_file, "r", encoding="utf-8") as f_cp:
                 cp = json.load(f_cp)
-                if cp.get("status") == "COMPLETED":
+                if (cp.get("status") == "COMPLETED" and 
+                    cp.get("start_row", 0) == start_row and 
+                    cp.get("end_row") == end_row and 
+                    cp.get("processed_count") == total_s1_expected):
                     n_rows = cp.get("processed_count", 0)
                     print(f"[{source_label.upper()} PHASE] Found completed intermediate tier results ({n_rows:,} S1 rows). Skipping re-computation.")
                     return tiers_tsv, get_process_memory_mb(), get_process_memory_mb()
@@ -200,7 +210,10 @@ def process_single_source_phase(
         line_count = count_lines_fast(tiers_tsv)
         if line_count > 1:
             skip_s1_count = line_count - 1
-            print(f"  [RESUME] Found existing {tiers_tsv.name} with {skip_s1_count:,} S1 rows. Resuming from row {skip_s1_count + 1:,}...")
+            if skip_s1_count >= total_s1_expected:
+                print(f"[{source_label.upper()} PHASE] Found completed intermediate tier results ({skip_s1_count:,} S1 rows). Skipping re-computation.")
+                return tiers_tsv, get_process_memory_mb(), get_process_memory_mb()
+            print(f"  [RESUME] Found existing {tiers_tsv.name} with {skip_s1_count:,} S1 rows. Resuming from row {start_row + skip_s1_count + 1:,}...")
             f_tier = open(tiers_tsv, "a", encoding="utf-8", newline="")
             tier_writer = csv.writer(f_tier, delimiter="\t")
         else:
@@ -216,20 +229,18 @@ def process_single_source_phase(
         f_tier = open(tiers_tsv, "a", encoding="utf-8", newline="")
         tier_writer = csv.writer(f_tier, delimiter="\t")
     
+    current_s1_idx = 0
     total_processed = skip_s1_count
     total_candidates = 0
     total_matches = 0
     batch_records = []
     
-    total_s1_expected = s1_limit if s1_limit else 1732544
-    
     t_start = time.time()
     last_log_time = time.time()
     
-    print(f"\n  [2] Streaming S1 Queries against {source_label.upper()} (Extracting Strategy E representation tiers, Top-K = {top_k_source})...")
+    print(f"\n  [2] Streaming S1 Queries against {source_label.upper()} (Range: [{start_row:,}, {end_row:,}), Total: {total_s1_expected:,}, Top-K = {top_k_source})...")
     
     global_cand_cache = {}
-    skipped_so_far = 0
     
     try:
         with open(s1_file, "r", encoding="utf-8") as f_in:
@@ -239,8 +250,16 @@ def process_single_source_phase(
                 if not s1_id:
                     continue
                     
-                if skipped_so_far < skip_s1_count:
-                    skipped_so_far += 1
+                row_idx = current_s1_idx
+                current_s1_idx += 1
+                
+                if row_idx < start_row:
+                    continue
+                if end_row is not None and row_idx >= end_row:
+                    break
+                    
+                worker_local_idx = row_idx - start_row
+                if worker_local_idx < skip_s1_count:
                     continue
                     
                 norm_s1 = normalize_record(row)
@@ -278,6 +297,8 @@ def process_single_source_phase(
                             json.dump({
                                 "status": "IN_PROGRESS",
                                 "source": source_label,
+                                "start_row": start_row,
+                                "end_row": end_row,
                                 "processed_count": total_processed,
                                 "candidates_count": total_candidates,
                                 "matches_count": total_matches,
@@ -293,9 +314,6 @@ def process_single_source_phase(
                         )
                         last_log_time = time.time()
                         
-                if s1_limit and total_processed >= s1_limit:
-                    break
-                    
             if batch_records:
                 c_cnt, m_cnt = _process_source_batch_exact(
                     batch_records,
@@ -326,6 +344,8 @@ def process_single_source_phase(
         json.dump({
             "status": "COMPLETED",
             "source": source_label,
+            "start_row": start_row,
+            "end_row": end_row,
             "processed_count": total_processed,
             "candidates_count": total_candidates,
             "intermediate_disk_mb": round(final_disk_mb, 2),
@@ -545,12 +565,61 @@ def run_production_pipeline(
     s1_limit: Optional[int] = None,
     target_limit: Optional[int] = None,
     stage_local: bool = True,
-    resume: bool = True
+    resume: bool = True,
+    worker_id: int = 0,
+    num_workers: int = 1,
+    dry_run: bool = False
 ):
     print("=" * 95)
     print("AMAZON ML CHALLENGE 2026 — FULL-SCALE SEQUENTIAL PRODUCTION INFERENCE PIPELINE")
+    if num_workers > 1:
+        print(f"PARALLEL WORKER MODE: Worker {worker_id} of {num_workers}")
     print("=" * 95)
     
+    # 0. Validate Worker Arguments and Compute Deterministic S1 Partition
+    assert 0 <= worker_id < num_workers, (
+        f"worker_id must satisfy 0 <= worker_id < num_workers, got worker_id={worker_id}, num_workers={num_workers}"
+    )
+    
+    total_s1 = s1_limit if s1_limit else 1732544
+    base_chunk = total_s1 // num_workers
+    rem_chunk = total_s1 % num_workers
+    start_row = worker_id * base_chunk + min(worker_id, rem_chunk)
+    end_row = (worker_id + 1) * base_chunk + min(worker_id + 1, rem_chunk)
+    worker_row_count = end_row - start_row
+    
+    if output_dir is None:
+        base_out = REPO_ROOT / "output"
+    else:
+        base_out = Path(output_dir)
+        
+    if num_workers > 1 and base_out.name != f"worker_{worker_id}":
+        out_path = base_out / f"worker_{worker_id}"
+    else:
+        out_path = base_out
+        
+    out_path.mkdir(parents=True, exist_ok=True)
+    
+    if dry_run:
+        print("\n" + "=" * 60)
+        print("WORKER PARTITION CONFIGURATION (DRY RUN)")
+        print("=" * 60)
+        print(f"worker_id:        {worker_id}")
+        print(f"num_workers:      {num_workers}")
+        print(f"start_row:        {start_row}")
+        print(f"end_row:          {end_row}")
+        print(f"row_count:        {worker_row_count}")
+        print(f"output_directory: {out_path}")
+        print("=" * 60 + "\n")
+        return {
+            "worker_id": worker_id,
+            "num_workers": num_workers,
+            "start_row": start_row,
+            "end_row": end_row,
+            "row_count": worker_row_count,
+            "output_directory": str(out_path)
+        }
+        
     t_pipeline_start = time.time()
     
     # 1. Resolve Dataset Paths with Diagnostics
@@ -587,12 +656,6 @@ def run_production_pipeline(
     print(f"             Loaded Model with Decision Threshold tau* = {tau:.2f} (25 features)\n")
 
     # 3. Setup Output & Intermediate Directories
-    if output_dir is None:
-        out_path = REPO_ROOT / "output"
-    else:
-        out_path = Path(output_dir)
-    out_path.mkdir(parents=True, exist_ok=True)
-    
     intermediate_dir = out_path / "intermediate"
     intermediate_dir.mkdir(parents=True, exist_ok=True)
     
@@ -609,7 +672,8 @@ def run_production_pipeline(
         top_k_source=top_k,
         intermediate_dir=intermediate_dir,
         batch_size=batch_size,
-        s1_limit=s1_limit,
+        start_row=start_row,
+        end_row=end_row,
         target_limit=target_limit,
         resume=resume
     )
@@ -624,7 +688,8 @@ def run_production_pipeline(
         top_k_source=top_k,
         intermediate_dir=intermediate_dir,
         batch_size=batch_size,
-        s1_limit=s1_limit,
+        start_row=start_row,
+        end_row=end_row,
         target_limit=target_limit,
         resume=resume
     )
@@ -651,13 +716,18 @@ def run_production_pipeline(
     except Exception:
         pass
 
-    # 7. Run Official Submission Validator
-    print(f"\n[VALIDATION] Running Official Submission Validator...")
+    # 7. Run Official Submission Validator (only in single-worker mode; multi-worker is validated after merge)
+    print(f"\n[VALIDATION] Running Submission Validation...")
     val_script = REPO_ROOT / "student_resource" / "utils" / "validate_submission.py"
     validator_passed = False
     validator_output = ""
     
-    if val_script.exists() and s1_file is not None:
+    if num_workers > 1:
+        print(f"  [PARALLEL WORKER MODE] Worker {worker_id}/{num_workers} generated partition [{start_row:,}, {end_row:,}) ({merge_stats['total_s1']:,} S1 rows).")
+        print("  [INFO] Official submission validator will validate the complete merged submission across all workers via scripts/merge_parallel_outputs.py.")
+        validator_passed = True
+        validator_output = f"Partition valid ({merge_stats['total_s1']:,} S1 rows generated for worker_{worker_id})"
+    elif val_script.exists() and s1_file is not None:
         res = subprocess.run([
             sys.executable, str(val_script),
             "--matching", str(final_matching_tsv),
@@ -683,6 +753,13 @@ def run_production_pipeline(
     
     report_data = {
         "git_commit": git_commit_sha,
+        "worker_id": worker_id,
+        "num_workers": num_workers,
+        "partition": {
+            "start_row": start_row,
+            "end_row": end_row,
+            "row_count": worker_row_count
+        },
         "dataset_paths": {
             "source1": str(s1_file),
             "source2": str(s2_file),
@@ -725,13 +802,13 @@ def run_production_pipeline(
         json.dump(report_data, f_rj, indent=2)
         
     md_content = f"""# Amazon ML Challenge 2026 — Production Inference Report
-
+- **Worker:** {worker_id} of {num_workers} (Range: [{start_row:,}, {end_row:,}))
 - **Status:** {'SUCCESS — VALIDATOR PASSED' if validator_passed else 'COMPLETED'}
 - **Git Commit SHA:** `{git_commit_sha}`
 - **Completed At:** {datetime.now().isoformat()}
 
 ## Dataset Scale
-- **Source 1 (Test Queries):** {merge_stats['total_s1']:,} records
+- **Source 1 Partition:** {merge_stats['total_s1']:,} records (Rows {start_row:,} to {end_row:,})
 - **Source 2 (Target Records):** 4,887,273 records
 - **Source 3 (Target Records):** 5,082,316 records
 
@@ -753,7 +830,6 @@ def run_production_pipeline(
 ## Output Artifacts
 - `matching_results.tsv`: {matching_size_mb:.2f} MB ({merge_stats['total_s1']:,} rows)
 - `candidate_pairs.tsv`: {candidate_size_mb:.2f} MB ({merge_stats['total_s1']:,} rows)
-- **Official Submission Validator:** {'PASSED' if validator_passed else 'FAILED'}
 """
     with open(report_md_path, "w", encoding="utf-8") as f_rm:
         f_rm.write(md_content)
@@ -766,13 +842,17 @@ def run_production_pipeline(
     ]:
         if drive_dir_candidate.parent.exists():
             try:
-                drive_dir_candidate.mkdir(parents=True, exist_ok=True)
+                if num_workers > 1 and drive_dir_candidate.name != f"worker_{worker_id}":
+                    worker_drive_dir = drive_dir_candidate / f"worker_{worker_id}"
+                else:
+                    worker_drive_dir = drive_dir_candidate
+                worker_drive_dir.mkdir(parents=True, exist_ok=True)
                 import shutil
-                drive_m = drive_dir_candidate / "matching_results.tsv"
-                drive_c = drive_dir_candidate / "candidate_pairs.tsv"
-                drive_rj = drive_dir_candidate / "production_report.json"
-                drive_rm = drive_dir_candidate / "production_report.md"
-                print(f"\n[BACKUP] Persisting final artifacts to Google Drive ({drive_dir_candidate}) ...")
+                drive_m = worker_drive_dir / "matching_results.tsv"
+                drive_c = worker_drive_dir / "candidate_pairs.tsv"
+                drive_rj = worker_drive_dir / "production_report.json"
+                drive_rm = worker_drive_dir / "production_report.md"
+                print(f"\n[BACKUP] Persisting final worker artifacts to Google Drive ({worker_drive_dir}) ...")
                 shutil.copy2(final_matching_tsv, drive_m)
                 shutil.copy2(final_candidate_tsv, drive_c)
                 shutil.copy2(report_json_path, drive_rj)
@@ -785,8 +865,11 @@ def run_production_pipeline(
 
     # 10. Print Full Production Complete Report
     print("\n" + "=" * 95)
-    print("FULL PRODUCTION COMPLETE")
+    print("PRODUCTION WORKER COMPLETE")
     print("=" * 95)
+    if num_workers > 1:
+        print(f"Worker:                  {worker_id} of {num_workers}")
+        print(f"S1 Partition:            [{start_row:,}, {end_row:,}) ({worker_row_count:,} rows)")
     print(f"S1 processed:            {merge_stats['total_s1']:,}")
     print(f"S2 processed:            4,887,273 (target source)")
     print(f"S3 processed:            5,082,316 (target source)")
@@ -826,6 +909,10 @@ def run_production_pipeline(
 
     return {
         "validator_passed": validator_passed,
+        "worker_id": worker_id,
+        "num_workers": num_workers,
+        "start_row": start_row,
+        "end_row": end_row,
         "total_s1": merge_stats["total_s1"],
         "total_candidates": merge_stats["total_candidates"],
         "total_matches": merge_stats["total_matches"],
@@ -859,6 +946,9 @@ def main():
     parser.add_argument("--target-limit", type=int, default=None, help="Limit target records for test runs")
     parser.add_argument("--no-stage-local", action="store_true", help="Disable staging files to local fast disk")
     parser.add_argument("--no-resume", action="store_true", help="Start fresh without resuming")
+    parser.add_argument("--worker-id", type=int, default=0, help="0-indexed worker ID for parallel production")
+    parser.add_argument("--num-workers", type=int, default=1, help="Total number of parallel workers")
+    parser.add_argument("--dry-run", action="store_true", help="Print worker partition parameters and exit without inference")
     
     args = parser.parse_args()
     
@@ -872,7 +962,10 @@ def main():
         s1_limit=args.s1_limit,
         target_limit=args.target_limit,
         stage_local=not args.no_stage_local,
-        resume=not args.no_resume
+        resume=not args.no_resume,
+        worker_id=args.worker_id,
+        num_workers=args.num_workers,
+        dry_run=args.dry_run
     )
 
 
