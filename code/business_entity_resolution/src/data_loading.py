@@ -1,7 +1,13 @@
 import csv
 import sys
 from pathlib import Path
-from src.normalization import normalize_record
+try:
+    from src.normalization import normalize_record
+except ImportError:
+    try:
+        from code.business_entity_resolution.src.normalization import normalize_record
+    except ImportError:
+        from normalization import normalize_record
 
 csv.field_size_limit(sys.maxsize)
 

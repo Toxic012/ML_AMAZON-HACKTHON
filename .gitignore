@@ -30,3 +30,6 @@ output/
 outputs/
 results/
 artifacts/
+experiments/*/results/
+experiments/*/artifacts/
+experiments/*/logs/

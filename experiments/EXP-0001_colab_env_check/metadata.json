@@ -1,0 +1,193 @@
+{
+  "experiment_id": "EXP-0001_colab_env_check",
+  "timestamp": "2026-09-26T11:00:06.247202",
+  "git": {
+    "commit": "1aa9217ceb33ce8c1b18131818a330322d4316d8",
+    "branch": "main",
+    "is_dirty": true,
+    "is_expected_commit": true,
+    "expected_commit": "1aa9217"
+  },
+  "hardware": {
+    "platform": "Windows-10-10.0.19045-SP0",
+    "python_version": "3.13.5",
+    "cpu_count_logical": 4,
+    "total_ram_gb": 7.92,
+    "gpu_available": false,
+    "gpu_count": 0,
+    "gpu_devices": [],
+    "available_ram_gb": 1.18,
+    "torch_version": "2.14.0+cpu",
+    "cuda_available": false
+  },
+  "packages": {
+    "torch": "2.14.0",
+    "torchvision": "not_installed",
+    "torchaudio": "not_installed",
+    "lightgbm": "not_installed",
+    "xgboost": "1.6.2",
+    "catboost": "not_installed",
+    "polars": "not_installed",
+    "pandas": "2.2.3",
+    "numpy": "2.2.4",
+    "scipy": "1.15.2",
+    "scikit-learn": "1.7.1",
+    "transformers": "5.17.0",
+    "sentence-transformers": "6.0.1",
+    "faiss-cpu": "not_installed",
+    "faiss-gpu": "not_installed",
+    "rapidfuzz": "not_installed",
+    "joblib": "1.5.1"
+  },
+  "dataset": {
+    "data_dir": "C:\\Users\\HP\\Desktop\\ML_AMAZON\\student_resource\\dataset",
+    "dataset_path_status": "DATASET_PATH_FOUND",
+    "exists": true,
+    "files": {
+      "train_source1": {
+        "path": "C:\\Users\\HP\\Desktop\\ML_AMAZON\\student_resource\\dataset\\train\\train_source1.tsv",
+        "exists": true,
+        "size_mb": 200.34,
+        "header": [
+          "entity_id",
+          "business_name",
+          "business_address",
+          "country"
+        ],
+        "approx_rows": 2206821,
+        "line_count": 2206822
+      },
+      "train_source2": {
+        "path": "C:\\Users\\HP\\Desktop\\ML_AMAZON\\student_resource\\dataset\\train\\train_source2.tsv",
+        "exists": true,
+        "size_mb": 466.63,
+        "header": [
+          "entity_id",
+          "business_name",
+          "business_address",
+          "country"
+        ],
+        "approx_rows": 5034616,
+        "line_count": 5034617
+      },
+      "train_source3": {
+        "path": "C:\\Users\\HP\\Desktop\\ML_AMAZON\\student_resource\\dataset\\train\\train_source3.tsv",
+        "exists": true,
+        "size_mb": 480.37,
+        "header": [
+          "entity_id",
+          "business_name",
+          "business_address",
+          "country"
+        ],
+        "approx_rows": 5285603,
+        "line_count": 5285604
+      },
+      "train_ground_truth": {
+        "path": "C:\\Users\\HP\\Desktop\\ML_AMAZON\\student_resource\\dataset\\train\\train_ground_truth.tsv",
+        "exists": true,
+        "size_mb": 121.13,
+        "header": [
+          "source1_entity_id",
+          "matched_entity_ids"
+        ],
+        "approx_rows": 2206821,
+        "line_count": 2206822
+      },
+      "test_source1": {
+        "path": "C:\\Users\\HP\\Desktop\\ML_AMAZON\\student_resource\\dataset\\test\\test_source1.tsv",
+        "exists": true,
+        "size_mb": 166.91,
+        "header": [
+          "entity_id",
+          "business_name",
+          "business_address",
+          "country"
+        ],
+        "approx_rows": 1732544,
+        "line_count": 1732545
+      },
+      "test_source2": {
+        "path": "C:\\Users\\HP\\Desktop\\ML_AMAZON\\student_resource\\dataset\\test\\test_source2.tsv",
+        "exists": true,
+        "size_mb": 485.86,
+        "header": [
+          "entity_id",
+          "business_name",
+          "business_address",
+          "country"
+        ],
+        "approx_rows": 4887273,
+        "line_count": 4887274
+      },
+      "test_source3": {
+        "path": "C:\\Users\\HP\\Desktop\\ML_AMAZON\\student_resource\\dataset\\test\\test_source3.tsv",
+        "exists": true,
+        "size_mb": 482.56,
+        "header": [
+          "entity_id",
+          "business_name",
+          "business_address",
+          "country"
+        ],
+        "approx_rows": 5082316,
+        "line_count": 5082317
+      }
+    },
+    "all_required_present": true,
+    "total_size_mb": 2403.81
+  },
+  "gpu_benchmark": {
+    "cuda_available": false,
+    "gpu_model": null,
+    "gpu_vram_gb": null,
+    "model_name": "sentence-transformers/all-MiniLM-L6-v2",
+    "batch_size": 16,
+    "sample_count": 16,
+    "runtime_ms": null,
+    "status": "skipped_cuda_not_available",
+    "error": "CUDA is not available on this runtime."
+  },
+  "cpu_benchmark": {
+    "status": "success",
+    "sample_size": 100,
+    "stage_1_normalization": {
+      "runtime_ms": 1.952,
+      "records_processed": 100
+    },
+    "stage_2_tokenization": {
+      "runtime_ms": 0.286,
+      "total_tokens": 1198
+    },
+    "stage_3_inverted_index": {
+      "runtime_ms": 0.109,
+      "unique_keys": 225
+    },
+    "stage_4_candidate_generation": {
+      "runtime_ms": 0.32,
+      "candidate_pairs_found": 486
+    },
+    "stage_5_feature_extraction": {
+      "runtime_ms": 0.125,
+      "pairs_evaluated": 50
+    },
+    "total_cpu_time_ms": 2.792,
+    "memory_info": {
+      "rss_mb": 197.52
+    }
+  },
+  "compute_policy": {
+    "cpu_operations": [
+      "tsv_streaming",
+      "unicode_normalization",
+      "token_index",
+      "token_blocking",
+      "submission_formatting"
+    ],
+    "gpu_operations": [
+      "embeddings",
+      "neural_reranking",
+      "gpu_gbdt_if_benchmarked"
+    ]
+  }
+}
