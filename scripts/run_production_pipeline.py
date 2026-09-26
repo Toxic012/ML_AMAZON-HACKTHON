@@ -1,15 +1,24 @@
 #!/usr/bin/env python3
 """
-High-Performance Resumable Production Pipeline & Submission Generator
+High-Performance Sequential Production Pipeline & Submission Generator
 Amazon ML Challenge 2026 — Business Entity Resolution
 
-Features:
-- Stream-based target indexing (Source 2 and Source 3) with compact tuple storage.
-- Resumable checkpointing (resumes immediately if process is interrupted).
-- Chunked S1 streaming & batch vectorized feature extraction (LightGBM).
-- Direct disk flushing to matching_results.tsv and candidate_pairs.tsv.
-- Memory-safe (< 4 GB peak RSS) for full 1.73M test set.
-- Automatic official submission validation upon completion.
+Architecture:
+1. Phase 1 (Source 2):
+   - Index Target Source 2 into compact memory representation.
+   - Stream S1 queries through Strategy E (Source 2 quota: K/2=25) & LightGBM scoring.
+   - Stream matches & candidates to intermediate/s2_matches.tsv and intermediate/s2_candidates.tsv.
+   - Explicitly delete Source 2 index & target store, trigger GC, log freed RAM.
+2. Phase 2 (Source 3):
+   - Index Target Source 3 into compact memory representation.
+   - Stream S1 queries through Strategy E (Source 3 quota: K/2=25) & LightGBM scoring.
+   - Stream matches & candidates to intermediate/s3_matches.tsv and intermediate/s3_candidates.tsv.
+   - Explicitly delete Source 3 index & target store, trigger GC, log freed RAM.
+3. Phase 3 (Stream Merge):
+   - Stream-merge S2 and S3 outputs line-by-line into matching_results.tsv and candidate_pairs.tsv.
+   - Peak RSS during merge < 50 MB.
+4. Phase 4 (Validation):
+   - Automatic submission validation via official student_resource validator.
 """
 
 import os
@@ -36,17 +45,31 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 try:
-    from src.config import get_dataset_dir, resolve_dataset_paths, print_dataset_diagnostics, stage_test_files_locally, EXPERIMENTS_DIR, BASE_DIR
+    from src.config import (
+        get_dataset_dir,
+        resolve_dataset_paths,
+        print_dataset_diagnostics,
+        stage_test_files_locally,
+        EXPERIMENTS_DIR,
+        BASE_DIR
+    )
     from src.normalization import normalize_record, normalize_text
     from src.blocking.token_index import InvertedTokenIndex
-    from src.blocking.strategies import block_hybrid_full_union
+    from src.blocking.strategies import block_hybrid_single_source
     from src.features import compute_pairwise_features
     from src.matching.matcher import EntityMatcher
 except ImportError:
-    from code.business_entity_resolution.src.config import get_dataset_dir, resolve_dataset_paths, print_dataset_diagnostics, stage_test_files_locally, EXPERIMENTS_DIR, BASE_DIR
+    from code.business_entity_resolution.src.config import (
+        get_dataset_dir,
+        resolve_dataset_paths,
+        print_dataset_diagnostics,
+        stage_test_files_locally,
+        EXPERIMENTS_DIR,
+        BASE_DIR
+    )
     from code.business_entity_resolution.src.normalization import normalize_record, normalize_text
     from code.business_entity_resolution.src.blocking.token_index import InvertedTokenIndex
-    from code.business_entity_resolution.src.blocking.strategies import block_hybrid_full_union
+    from code.business_entity_resolution.src.blocking.strategies import block_hybrid_single_source
     from code.business_entity_resolution.src.features import compute_pairwise_features
     from code.business_entity_resolution.src.matching.matcher import EntityMatcher
 
@@ -59,12 +82,22 @@ def get_process_memory_mb() -> float:
         return 0.0
 
 
+def count_lines_fast(file_path: Path) -> int:
+    """Memory-safe line counter using chunked buffered reads."""
+    count = 0
+    with open(file_path, "rb") as f:
+        buffer_size = 1024 * 1024
+        while chunk := f.read(buffer_size):
+            count += chunk.count(b"\n")
+    return count
+
+
 def stream_compact_index(source_path: Path, max_token_freq: int = 5000, limit: Optional[int] = None, log_every: int = 250000):
     """
-    Streams a target TSV (S2/S3) and builds:
-    1. Inverted index for fast candidate retrieval
-    2. Compact tuple dictionary (norm_name, norm_addr, country) for fast feature extraction
-    With periodic diagnostic progress logging every log_every records.
+    Streams a target TSV (S2 or S3) and builds:
+    1. Inverted index for fast candidate retrieval.
+    2. Compact tuple dictionary (norm_name, norm_addr, country) for fast feature extraction.
+    With periodic diagnostic progress logging.
     """
     index = InvertedTokenIndex(max_token_freq=max_token_freq)
     target_store: Dict[str, Tuple[str, str, str]] = {}
@@ -106,125 +139,72 @@ def stream_compact_index(source_path: Path, max_token_freq: int = 5000, limit: O
     return index, target_store, count, elapsed
 
 
-def run_production_pipeline(
-    data_dir: Optional[str] = None,
-    model_path: Optional[str] = None,
-    output_dir: Optional[str] = None,
-    top_k: int = 50,
-    threshold: float = 0.83,
+def process_single_source_phase(
+    source_label: str,
+    source_file: Path,
+    s1_file: Path,
+    matcher: EntityMatcher,
+    threshold: float,
+    top_k_source: int,
+    intermediate_dir: Path,
     batch_size: int = 2000,
     s1_limit: Optional[int] = None,
     target_limit: Optional[int] = None,
-    stage_local: bool = True,
     resume: bool = True
-):
-    print("=" * 95)
-    print("AMAZON ML CHALLENGE 2026 — FULL-SCALE PRODUCTION INFERENCE PIPELINE")
-    print("=" * 95)
+) -> Tuple[Path, Path, float, float]:
+    """
+    Executes a complete isolated inference pass for one target source (S2 or S3):
+    1. Indexes target source in compact memory representation.
+    2. Streams all S1 entities, extracts top_k_source candidates, scores with LightGBM.
+    3. Streams matches and candidates incrementally to intermediate TSVs.
+    4. Deletes target index & store, triggers garbage collection, measures memory drop.
+    Returns (matches_tsv_path, candidates_tsv_path, peak_rss_mb, post_cleanup_rss_mb).
+    """
+    matches_tsv = intermediate_dir / f"{source_label.lower()}_matches.tsv"
+    candidates_tsv = intermediate_dir / f"{source_label.lower()}_candidates.tsv"
+    checkpoint_file = intermediate_dir / f".{source_label.lower()}_checkpoint.json"
     
-    t_pipeline_start = time.time()
-    
-    # 1. Resolve Dataset Paths with Diagnostics
-    resolved_paths = resolve_dataset_paths(data_dir)
-    print_dataset_diagnostics(resolved_paths)
-    
-    # Optionally stage test files to local Colab NVMe / fast disk to avoid Drive FUSE latency
-    if stage_local:
-        resolved_paths = stage_test_files_locally(resolved_paths)
-    
-    s1_file = resolved_paths.get("test_source1")
-    s2_file = resolved_paths.get("test_source2")
-    s3_file = resolved_paths.get("test_source3")
-    
-    assert s1_file and s1_file.exists(), (
-        f"[FATAL CONFIG ERROR] Test Source 1 file could not be resolved in {resolved_paths['data_dir']}!\n"
-        f"Searched for filenames: ['test_source1.tsv', 'source1.tsv', 'test_source1.csv', 'source1.csv']"
-    )
-    assert s2_file and s2_file.exists(), (
-        f"[FATAL CONFIG ERROR] Test Source 2 file could not be resolved in {resolved_paths['data_dir']}!\n"
-        f"Searched for filenames: ['test_source2.tsv', 'source2.tsv', 'test_source2.csv', 'source2.csv']"
-    )
-    assert s3_file and s3_file.exists(), (
-        f"[FATAL CONFIG ERROR] Test Source 3 file could not be resolved in {resolved_paths['data_dir']}!\n"
-        f"Searched for filenames: ['test_source3.tsv', 'source3.tsv', 'test_source3.csv', 'source3.csv']"
-    )
-    
-    # 2. Load Trained Matcher Model
-    if model_path is None:
-        model_path = EXPERIMENTS_DIR / "PHASE_3_pairwise_matching" / "matcher_model.pkl"
-    else:
-        model_path = Path(model_path)
-        
-    print(f"\n[1] Loading Trained LightGBM Matcher from {model_path} ...")
-    matcher = EntityMatcher.load(model_path)
-    tau = threshold if threshold is not None else matcher.best_threshold
-    print(f"    Loaded Model with Decision Threshold tau* = {tau:.2f} (25 features)")
-
-    # 3. Stream Index Target Datasets
-    print(f"\n[2] Indexing Test Target Datasets (Source 2 and Source 3)...")
-    print(f"    -> Streaming {s2_file.name} ...")
-    s2_index, s2_store, n_s2, t_s2 = stream_compact_index(s2_file, limit=target_limit)
-    print(f"       [OK] S2 Indexed: {n_s2:,} records in {t_s2:.2f}s | RSS: {get_process_memory_mb()} MB")
-    
-    print(f"    -> Streaming {s3_file.name} ...")
-    s3_index, s3_store, n_s3, t_s3 = stream_compact_index(s3_file, limit=target_limit)
-    print(f"       [OK] S3 Indexed: {n_s3:,} records in {t_s3:.2f}s | RSS: {get_process_memory_mb()} MB")
-    
-    target_store = {**s2_store, **s3_store}
-    print(f"    Total Target Universe Available: {len(target_store):,} records | Post-Index RSS: {get_process_memory_mb()} MB")
-
-    # 4. Prepare Output and Checkpoint Files
-    if output_dir is None:
-        out_path = REPO_ROOT / "output"
-    else:
-        out_path = Path(output_dir)
-    out_path.mkdir(parents=True, exist_ok=True)
-    
-    matching_tsv = out_path / "matching_results.tsv"
-    candidate_tsv = out_path / "candidate_pairs.tsv"
-    checkpoint_file = out_path / ".inference_checkpoint.json"
-    
-    # Check existing progress
-    processed_s1_ids = set()
-    if resume and checkpoint_file.exists() and matching_tsv.exists() and candidate_tsv.exists():
+    # Check if already completed under resume mode
+    if resume and matches_tsv.exists() and candidates_tsv.exists() and checkpoint_file.exists():
         try:
             with open(checkpoint_file, "r", encoding="utf-8") as f_cp:
-                cp_data = json.load(f_cp)
-                processed_count = cp_data.get("processed_count", 0)
-                print(f"\n[RESUME] Found existing checkpoint with {processed_count:,} processed S1 entities.")
-                # Read already processed IDs from matching_tsv
-                with open(matching_tsv, "r", encoding="utf-8") as f_m:
-                    next(f_m, None)
-                    for line in f_m:
-                        parts = line.split("\t", 1)
-                        if parts and parts[0].strip():
-                            processed_s1_ids.add(parts[0].strip())
-                print(f"         Verified {len(processed_s1_ids):,} existing records. Resuming remaining entities...")
-        except Exception as e:
-            print(f"[WARN] Failed to read checkpoint ({e}). Starting fresh.")
-            processed_s1_ids = set()
+                cp = json.load(f_cp)
+                if cp.get("status") == "COMPLETED":
+                    n_rows = cp.get("processed_count", 0)
+                    print(f"[{source_label.upper()} PHASE] Found completed intermediate results ({n_rows:,} S1 rows). Skipping re-computation.")
+                    return matches_tsv, candidates_tsv, get_process_memory_mb(), get_process_memory_mb()
+        except Exception:
+            pass
 
-    # If starting fresh, initialize files with exact required headers
-    if not processed_s1_ids:
-        with open(matching_tsv, "w", encoding="utf-8", newline="") as f_m:
-            f_m.write("source1_entity_id\tmatched_entity_ids\n")
-        with open(candidate_tsv, "w", encoding="utf-8", newline="") as f_c:
-            f_c.write("source1_entity_id\tcandidate_entity_ids\n")
-
-    # 5. Stream S1 Entities and Execute Inference in Batches
-    print(f"\n[3] Streaming Source 1 Entities & Executing Inference (Batch Size = {batch_size:,})...")
+    print("=" * 90)
+    print(f"[{source_label.upper()} PHASE] Indexing & Inference for {source_file.name}")
+    print("=" * 90)
     
-    f_match = open(matching_tsv, "a", encoding="utf-8", newline="")
-    f_cand = open(candidate_tsv, "a", encoding="utf-8", newline="")
+    rss_phase_start = get_process_memory_mb()
+    print(f"  [1] Building {source_label.upper()} Inverted Index from {source_file.name} (Start RSS: {rss_phase_start} MB)...")
+    target_index, target_store, n_target, t_index = stream_compact_index(source_file, limit=target_limit)
+    rss_post_index = get_process_memory_mb()
+    print(f"      [OK] {source_label.upper()} Indexed: {n_target:,} records in {t_index:.2f}s | RSS: {rss_post_index} MB (Delta: +{rss_post_index - rss_phase_start:.1f} MB)")
     
-    total_processed = len(processed_s1_ids)
-    total_candidates_generated = 0
-    total_matches_predicted = 0
-    singletons_count = 0
+    # Prepare intermediate TSVs
+    with open(matches_tsv, "w", encoding="utf-8", newline="") as f_m:
+        f_m.write("source1_entity_id\tmatched_entity_ids\n")
+    with open(candidates_tsv, "w", encoding="utf-8", newline="") as f_c:
+        f_c.write("source1_entity_id\tcandidate_entity_ids\n")
+        
+    f_match = open(matches_tsv, "a", encoding="utf-8", newline="")
+    f_cand = open(candidates_tsv, "a", encoding="utf-8", newline="")
     
+    total_processed = 0
+    total_candidates = 0
+    total_matches = 0
+    singletons = 0
     batch_records = []
-    t_start_s1 = time.time()
+    
+    t_start = time.time()
     last_log_time = time.time()
+    
+    print(f"\n  [2] Streaming S1 Queries against {source_label.upper()} (Top-K per source = {top_k_source}, Threshold = {threshold:.2f})...")
     
     try:
         with open(s1_file, "r", encoding="utf-8") as f_in:
@@ -233,137 +213,108 @@ def run_production_pipeline(
                 s1_id = row.get("entity_id")
                 if not s1_id:
                     continue
-                if s1_id in processed_s1_ids:
-                    continue
                     
                 norm_s1 = normalize_record(row)
                 batch_records.append(norm_s1)
                 
                 if len(batch_records) >= batch_size:
-                    # Process current batch
-                    c_gen, m_pred, s_cnt = process_s1_batch(
+                    c_cnt, m_cnt, s_cnt = _process_source_batch(
                         batch_records,
-                        s2_index,
-                        s3_index,
+                        target_index,
                         target_store,
                         matcher,
-                        tau,
-                        top_k,
+                        threshold,
+                        top_k_source,
                         f_match,
                         f_cand
                     )
-                    total_candidates_generated += c_gen
-                    total_matches_predicted += m_pred
-                    singletons_count += s_cnt
+                    total_candidates += c_cnt
+                    total_matches += m_cnt
+                    singletons += s_cnt
                     total_processed += len(batch_records)
-                    
-                    # Update checkpoint
-                    with open(checkpoint_file, "w", encoding="utf-8") as f_cp:
-                        json.dump({"processed_count": total_processed, "timestamp": datetime.now().isoformat()}, f_cp)
-                        
                     batch_records = []
                     
-                    if time.time() - last_log_time >= 15.0 or (total_processed % 10000 == 0):
-                        elapsed = time.time() - t_start_s1
+                    if time.time() - last_log_time >= 15.0 or (total_processed % 25000 == 0):
+                        elapsed = time.time() - t_start
                         qps = total_processed / max(0.001, elapsed)
-                        print(f"    Processed {total_processed:,} S1 entities... (Speed: {qps:.1f} S1/s | RSS: {get_process_memory_mb()} MB | Candidates: {total_candidates_generated:,} | Matches: {total_matches_predicted:,})")
+                        print(f"      Processed {total_processed:>9,} S1 entities... (Speed: {qps:6.1f} S1/s | RSS: {get_process_memory_mb():6.1f} MB | {source_label.upper()} Cands: {total_candidates:,} | {source_label.upper()} Matches: {total_matches:,})")
                         last_log_time = time.time()
-                        gc.collect()
                         
                 if s1_limit and total_processed >= s1_limit:
                     break
                     
-            # Process trailing batch
             if batch_records:
-                c_gen, m_pred, s_cnt = process_s1_batch(
+                c_cnt, m_cnt, s_cnt = _process_source_batch(
                     batch_records,
-                    s2_index,
-                    s3_index,
+                    target_index,
                     target_store,
                     matcher,
-                    tau,
-                    top_k,
+                    threshold,
+                    top_k_source,
                     f_match,
                     f_cand
                 )
-                total_candidates_generated += c_gen
-                total_matches_predicted += m_pred
-                singletons_count += s_cnt
+                total_candidates += c_cnt
+                total_matches += m_cnt
+                singletons += s_cnt
                 total_processed += len(batch_records)
                 
     finally:
         f_match.close()
         f_cand.close()
-
-    total_pipeline_time = round(time.time() - t_pipeline_start, 2)
-    print(f"\n[OK] Inference Execution Complete in {total_pipeline_time}s ({total_processed/max(0.001, total_pipeline_time):.1f} S1/sec)")
-    print(f"    Total S1 Entities Processed:  {total_processed:,}")
-    print(f"    Total Candidates Output:     {total_candidates_generated:,} (Mean: {total_candidates_generated/max(1, total_processed):.1f} / S1)")
-    print(f"    Total Matches Predicted:     {total_matches_predicted:,}")
-    print(f"    Singletons Output:           {singletons_count:,} ({singletons_count/max(1, total_processed)*100:.1f}%)")
-    print(f"    Peak Memory RSS:             {get_process_memory_mb()} MB")
-    print(f"    Matching File Size:          {round(matching_tsv.stat().st_size / (1024**2), 2)} MB")
-    print(f"    Candidate File Size:         {round(candidate_tsv.stat().st_size / (1024**2), 2)} MB")
-
-    # 6. Run Official Submission Validator
-    print(f"\n[4] Running Official Submission Validator...")
-    val_script = REPO_ROOT / "student_resource" / "utils" / "validate_submission.py"
-    validator_passed = False
+        
+    peak_rss = get_process_memory_mb()
+    total_elapsed = time.time() - t_start
+    print(f"\n  [OK] {source_label.upper()} Inference Finished: {total_processed:,} S1 entities in {total_elapsed:.2f}s ({total_processed/max(0.001, total_elapsed):.1f} S1/s)")
+    print(f"       Total {source_label.upper()} Candidates: {total_candidates:,} | Total {source_label.upper()} Matches: {total_matches:,} | Peak RSS: {peak_rss:.1f} MB")
     
-    if val_script.exists() and s1_file is not None:
-        res = subprocess.run([
-            sys.executable, str(val_script),
-            "--matching", str(matching_tsv),
-            "--candidate", str(candidate_tsv),
-            "--test-dir", str(s1_file.parent)
-        ], capture_output=True, text=True)
-        
-        print(f"    Validator Return Code: {res.returncode}")
-        print("\n" + "=" * 50 + " OFFICIAL VALIDATOR REPORT " + "=" * 50)
-        print(res.stdout.strip())
-        print("=" * 125)
-        
-        validator_passed = (res.returncode == 0)
-        if validator_passed:
-            print("\n>>> [SUCCESS] OFFICIAL SUBMISSION VALIDATOR PASSED (100% COMPLIANT) <<<")
-        else:
-            print("\n>>> [NOTICE] Validator report output shown above. <<<")
+    # Save checkpoint
+    with open(checkpoint_file, "w", encoding="utf-8") as f_cp:
+        json.dump({
+            "status": "COMPLETED",
+            "source": source_label,
+            "processed_count": total_processed,
+            "candidates_count": total_candidates,
+            "matches_count": total_matches,
+            "timestamp": datetime.now().isoformat()
+        }, f_cp)
 
-    return {
-        "validator_passed": validator_passed,
-        "total_s1": total_processed,
-        "total_candidates": total_candidates_generated,
-        "total_matches": total_matches_predicted,
-        "singletons": singletons_count,
-        "runtime_seconds": total_pipeline_time,
-        "matching_tsv": str(matching_tsv),
-        "candidate_tsv": str(candidate_tsv)
-    }
+    # 3. Clean up Index and Target Store from RAM
+    print(f"\n  [3] Freeing {source_label.upper()} Index and Target Store from RAM (Current RSS: {peak_rss:.1f} MB)...")
+    del target_index
+    del target_store
+    gc.collect()
+    
+    post_cleanup_rss = get_process_memory_mb()
+    freed_mb = peak_rss - post_cleanup_rss
+    print(f"      [AFTER {source_label.upper()} CLEANUP] RSS: {peak_rss:.1f} MB -> {post_cleanup_rss:.1f} MB (Successfully Freed: {freed_mb:.1f} MB)")
+    print("-" * 90 + "\n")
+    
+    return matches_tsv, candidates_tsv, peak_rss, post_cleanup_rss
 
 
-def process_s1_batch(
+def _process_source_batch(
     batch_s1: List[dict],
-    s2_index: InvertedTokenIndex,
-    s3_index: InvertedTokenIndex,
-    target_store: Dict[str, dict],
+    target_index: InvertedTokenIndex,
+    target_store: Dict[str, Tuple[str, str, str]],
     matcher: EntityMatcher,
     threshold: float,
-    top_k: int,
+    top_k_source: int,
     f_match,
     f_cand
 ) -> Tuple[int, int, int]:
-    """Processes a batch of S1 entities, extracts features, predicts matches, and flushes to disk."""
+    """Evaluates a batch of S1 queries against one target index, writes intermediate TSV lines."""
     total_cands = 0
     total_matches = 0
     singletons = 0
     
     for s1_rec in batch_s1:
         s1_id = s1_rec["entity_id"]
-        # Candidate Generation via Frozen Strategy E
-        cands = block_hybrid_full_union(s1_rec, s2_index, s3_index, top_k=top_k)
+        # Candidate Generation via Strategy E for single source
+        cands = block_hybrid_single_source(s1_rec, target_index, top_k=top_k_source)
         total_cands += len(cands)
         
-        # Write candidate pairs line
+        # Write intermediate candidate line
         f_cand.write(f"{s1_id}\t{','.join(cands)}\n")
         
         matched_ids = []
@@ -395,8 +346,246 @@ def process_s1_batch(
     return total_cands, total_matches, singletons
 
 
+def merge_source_predictions(
+    s2_match_tsv: Path,
+    s2_cand_tsv: Path,
+    s3_match_tsv: Path,
+    s3_cand_tsv: Path,
+    final_matching_tsv: Path,
+    final_candidate_tsv: Path
+) -> Tuple[int, int, int, int]:
+    """
+    Stream-merges intermediate S2 and S3 output TSVs into official competition submission format.
+    Memory-safe (O(1) RAM) streaming line-by-line.
+    """
+    print("=" * 90)
+    print("[PHASE 3/3] Stream-Merging S2 and S3 Predictions into Final Submission TSVs")
+    print("=" * 90)
+    t0 = time.time()
+    
+    total_s1 = 0
+    total_candidates = 0
+    total_matches = 0
+    singletons = 0
+    
+    # 1. Merge Matches
+    print(f"  -> Merging Matches: {s2_match_tsv.name} + {s3_match_tsv.name} -> {final_matching_tsv.name} ...")
+    with open(s2_match_tsv, "r", encoding="utf-8") as f2_m, \
+         open(s3_match_tsv, "r", encoding="utf-8") as f3_m, \
+         open(final_matching_tsv, "w", encoding="utf-8", newline="") as f_out_m:
+         
+        next(f2_m, None)
+        next(f3_m, None)
+        f_out_m.write("source1_entity_id\tmatched_entity_ids\n")
+        
+        for l2, l3 in zip(f2_m, f3_m):
+            p2 = l2.rstrip("\r\n").split("\t", 1)
+            p3 = l3.rstrip("\r\n").split("\t", 1)
+            s1_id = p2[0]
+            
+            m2 = p2[1].split(",") if (len(p2) > 1 and p2[1]) else []
+            m3 = p3[1].split(",") if (len(p3) > 1 and p3[1]) else []
+            
+            merged_matches = m2 + m3
+            if merged_matches:
+                total_matches += len(merged_matches)
+                f_out_m.write(f"{s1_id}\t{','.join(merged_matches)}\n")
+            else:
+                singletons += 1
+                f_out_m.write(f"{s1_id}\t\n")
+            total_s1 += 1
+            
+    # 2. Merge Candidates
+    print(f"  -> Merging Candidates: {s2_cand_tsv.name} + {s3_cand_tsv.name} -> {final_candidate_tsv.name} ...")
+    with open(s2_cand_tsv, "r", encoding="utf-8") as f2_c, \
+         open(s3_cand_tsv, "r", encoding="utf-8") as f3_c, \
+         open(final_candidate_tsv, "w", encoding="utf-8", newline="") as f_out_c:
+         
+        next(f2_c, None)
+        next(f3_c, None)
+        f_out_c.write("source1_entity_id\tcandidate_entity_ids\n")
+        
+        for l2, l3 in zip(f2_c, f3_c):
+            p2 = l2.rstrip("\r\n").split("\t", 1)
+            p3 = l3.rstrip("\r\n").split("\t", 1)
+            s1_id = p2[0]
+            
+            c2 = p2[1].split(",") if (len(p2) > 1 and p2[1]) else []
+            c3 = p3[1].split(",") if (len(p3) > 1 and p3[1]) else []
+            
+            merged_cands = c2 + c3
+            total_candidates += len(merged_cands)
+            f_out_c.write(f"{s1_id}\t{','.join(merged_cands)}\n")
+            
+    elapsed = time.time() - t0
+    print(f"  [OK] Stream Merge Complete in {elapsed:.2f}s | S1: {total_s1:,} | Matches: {total_matches:,} | Candidates: {total_candidates:,} | Singletons: {singletons:,}\n")
+    return total_s1, total_candidates, total_matches, singletons
+
+
+def run_production_pipeline(
+    data_dir: Optional[str] = None,
+    model_path: Optional[str] = None,
+    output_dir: Optional[str] = None,
+    top_k: int = 50,
+    threshold: float = 0.83,
+    batch_size: int = 2000,
+    s1_limit: Optional[int] = None,
+    target_limit: Optional[int] = None,
+    stage_local: bool = True,
+    resume: bool = True
+):
+    print("=" * 95)
+    print("AMAZON ML CHALLENGE 2026 — FULL-SCALE SEQUENTIAL PRODUCTION INFERENCE PIPELINE")
+    print("=" * 95)
+    
+    t_pipeline_start = time.time()
+    
+    # 1. Resolve Dataset Paths with Diagnostics
+    resolved_paths = resolve_dataset_paths(data_dir)
+    print_dataset_diagnostics(resolved_paths)
+    
+    # Optionally stage test files to local fast disk to avoid Drive FUSE latency
+    if stage_local:
+        resolved_paths = stage_test_files_locally(resolved_paths)
+    
+    s1_file = resolved_paths.get("test_source1")
+    s2_file = resolved_paths.get("test_source2")
+    s3_file = resolved_paths.get("test_source3")
+    
+    assert s1_file and s1_file.exists(), (
+        f"[FATAL CONFIG ERROR] Test Source 1 file could not be resolved in {resolved_paths['data_dir']}!"
+    )
+    assert s2_file and s2_file.exists(), (
+        f"[FATAL CONFIG ERROR] Test Source 2 file could not be resolved in {resolved_paths['data_dir']}!"
+    )
+    assert s3_file and s3_file.exists(), (
+        f"[FATAL CONFIG ERROR] Test Source 3 file could not be resolved in {resolved_paths['data_dir']}!"
+    )
+    
+    # 2. Load Trained Matcher Model
+    if model_path is None:
+        model_path = EXPERIMENTS_DIR / "PHASE_3_pairwise_matching" / "matcher_model.pkl"
+    else:
+        model_path = Path(model_path)
+        
+    print(f"\n[LOAD MODEL] Loading Trained LightGBM Matcher from {model_path} ...")
+    matcher = EntityMatcher.load(model_path)
+    tau = threshold if threshold is not None else matcher.best_threshold
+    print(f"             Loaded Model with Decision Threshold tau* = {tau:.2f} (25 features)\n")
+
+    # 3. Setup Output & Intermediate Directories
+    if output_dir is None:
+        out_path = REPO_ROOT / "output"
+    else:
+        out_path = Path(output_dir)
+    out_path.mkdir(parents=True, exist_ok=True)
+    
+    intermediate_dir = out_path / "intermediate"
+    intermediate_dir.mkdir(parents=True, exist_ok=True)
+    
+    final_matching_tsv = out_path / "matching_results.tsv"
+    final_candidate_tsv = out_path / "candidate_pairs.tsv"
+    
+    top_k_per_source = max(1, top_k // 2)
+
+    # 4. Phase 1: Source 2 Processing
+    s2_m_tsv, s2_c_tsv, s2_peak_rss, s2_post_rss = process_single_source_phase(
+        source_label="S2",
+        source_file=s2_file,
+        s1_file=s1_file,
+        matcher=matcher,
+        threshold=tau,
+        top_k_source=top_k_per_source,
+        intermediate_dir=intermediate_dir,
+        batch_size=batch_size,
+        s1_limit=s1_limit,
+        target_limit=target_limit,
+        resume=resume
+    )
+    
+    # 5. Phase 2: Source 3 Processing
+    s3_m_tsv, s3_c_tsv, s3_peak_rss, s3_post_rss = process_single_source_phase(
+        source_label="S3",
+        source_file=s3_file,
+        s1_file=s1_file,
+        matcher=matcher,
+        threshold=tau,
+        top_k_source=top_k_per_source,
+        intermediate_dir=intermediate_dir,
+        batch_size=batch_size,
+        s1_limit=s1_limit,
+        target_limit=target_limit,
+        resume=resume
+    )
+    
+    # 6. Phase 3: Merge Predictions & Candidates
+    total_s1, total_cands, total_matches, singletons = merge_source_predictions(
+        s2_match_tsv=s2_m_tsv,
+        s2_cand_tsv=s2_c_tsv,
+        s3_match_tsv=s3_m_tsv,
+        s3_cand_tsv=s3_c_tsv,
+        final_matching_tsv=final_matching_tsv,
+        final_candidate_tsv=final_candidate_tsv
+    )
+    
+    total_pipeline_time = round(time.time() - t_pipeline_start, 2)
+    
+    print("=" * 90)
+    print("PRODUCTION PIPELINE TELEMETRY SUMMARY")
+    print("=" * 90)
+    print(f"  Total Runtime:               {total_pipeline_time} seconds ({total_s1/max(0.001, total_pipeline_time):.1f} S1/sec)")
+    print(f"  Total S1 Entities:           {total_s1:,}")
+    print(f"  Total Candidates Output:     {total_cands:,} (Mean: {total_cands/max(1, total_s1):.1f} / S1)")
+    print(f"  Total Matches Predicted:     {total_matches:,}")
+    print(f"  Singletons Output:           {singletons:,} ({singletons/max(1, total_s1)*100:.1f}%)")
+    print(f"  S2 Peak RSS:                 {s2_peak_rss:.1f} MB (Post-Cleanup: {s2_post_rss:.1f} MB)")
+    print(f"  S3 Peak RSS:                 {s3_peak_rss:.1f} MB (Post-Cleanup: {s3_post_rss:.1f} MB)")
+    print(f"  Matching TSV Size:           {round(final_matching_tsv.stat().st_size / (1024**2), 2)} MB")
+    print(f"  Candidate TSV Size:          {round(final_candidate_tsv.stat().st_size / (1024**2), 2)} MB")
+    print("=" * 90 + "\n")
+
+    # 7. Run Official Submission Validator
+    print(f"[VALIDATION] Running Official Submission Validator...")
+    val_script = REPO_ROOT / "student_resource" / "utils" / "validate_submission.py"
+    validator_passed = False
+    
+    if val_script.exists() and s1_file is not None:
+        res = subprocess.run([
+            sys.executable, str(val_script),
+            "--matching", str(final_matching_tsv),
+            "--candidate", str(final_candidate_tsv),
+            "--test-dir", str(s1_file.parent)
+        ], capture_output=True, text=True)
+        
+        print(f"  Validator Return Code: {res.returncode}")
+        print("\n" + "=" * 50 + " OFFICIAL VALIDATOR REPORT " + "=" * 50)
+        print(res.stdout.strip())
+        print("=" * 125)
+        
+        validator_passed = (res.returncode == 0)
+        if validator_passed:
+            print("\n>>> [SUCCESS] OFFICIAL SUBMISSION VALIDATOR PASSED (100% COMPLIANT) <<<")
+        else:
+            print("\n>>> [NOTICE] Validator report output shown above. <<<")
+
+    return {
+        "validator_passed": validator_passed,
+        "total_s1": total_s1,
+        "total_candidates": total_cands,
+        "total_matches": total_matches,
+        "singletons": singletons,
+        "runtime_seconds": total_pipeline_time,
+        "s2_peak_rss": s2_peak_rss,
+        "s2_post_rss": s2_post_rss,
+        "s3_peak_rss": s3_peak_rss,
+        "s3_post_rss": s3_post_rss,
+        "matching_tsv": str(final_matching_tsv),
+        "candidate_tsv": str(final_candidate_tsv)
+    }
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Full Production Pipeline & Submission Generator")
+    parser = argparse.ArgumentParser(description="High-Performance Sequential Production Pipeline")
     parser.add_argument("--data-dir", type=str, default=None, help="Dataset directory path")
     parser.add_argument("--model-path", type=str, default=None, help="Trained model path")
     parser.add_argument("--output-dir", type=str, default=None, help="Output folder for submission TSVs")

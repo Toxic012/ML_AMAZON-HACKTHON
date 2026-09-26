@@ -287,6 +287,74 @@ def block_hybrid_A_char3_char4(s1_record: dict, s2_index: InvertedTokenIndex, s3
     return result[:top_k]
 
 
+def block_hybrid_single_source(s1_record: dict, target_index: InvertedTokenIndex, top_k: int = 25) -> List[str]:
+    """
+    Single-source candidate generation using the frozen EXP-0003 Strategy E multi-representation logic.
+    Used for sequential Source 2 and Source 3 memory-safe production processing.
+    """
+    country = s1_record.get("country", "")
+    norm_name = s1_record.get("norm_name", "")
+    tokens = s1_record.get("name_tokens", set())
+    c3 = s1_record.get("char_3grams", set())
+    c4 = s1_record.get("char_4grams", set())
+    addr_tokens = s1_record.get("addr_tokens", set())
+    postal_tokens = s1_record.get("postal_tokens", set())
+    
+    seen = set()
+    result = []
+    
+    # 1. Exact Name Priority
+    for eid in target_index.search_exact(country, norm_name):
+        if eid not in seen:
+            seen.add(eid)
+            result.append(eid)
+            
+    # 2. Word Token Overlap
+    rem = top_k - len(result)
+    if rem > 0:
+        quota = max(1, int(rem * 0.45))
+        for eid in target_index.search_tokens(country, tokens, top_k=quota):
+            if eid not in seen:
+                seen.add(eid)
+                result.append(eid)
+            if len(result) >= top_k:
+                break
+                
+    # 3. Char 4-Gram Overlap
+    rem = top_k - len(result)
+    if rem > 0:
+        quota = max(1, int(rem * 0.35))
+        for eid in target_index.search_char_ngrams(country, c4, n=4, top_k=quota):
+            if eid not in seen:
+                seen.add(eid)
+                result.append(eid)
+            if len(result) >= top_k:
+                break
+
+    # 4. Char 3-Gram Overlap
+    rem = top_k - len(result)
+    if rem > 0:
+        quota = max(1, int(rem * 0.5))
+        for eid in target_index.search_char_ngrams(country, c3, n=3, top_k=quota):
+            if eid not in seen:
+                seen.add(eid)
+                result.append(eid)
+            if len(result) >= top_k:
+                break
+                
+    # 5. Address & Postal Token Overlap
+    rem = top_k - len(result)
+    if rem > 0:
+        for eid in target_index.search_address(country, addr_tokens, postal_tokens, top_k=rem):
+            if eid not in seen:
+                seen.add(eid)
+                result.append(eid)
+            if len(result) >= top_k:
+                break
+                
+    return result[:top_k]
+
+
 def block_hybrid_full_union(s1_record: dict, s2_index: InvertedTokenIndex, s3_index: InvertedTokenIndex, top_k: int = 50) -> List[str]:
     """
     Ablation E: Hybrid Full Union (Ablation D + Address & Postal Token Retrieval).
