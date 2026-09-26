@@ -1,11 +1,11 @@
 {
   "experiment_id": "EXP-0001_colab_env_check",
-  "timestamp": "2026-09-26T11:00:06.247202",
+  "timestamp": "2026-09-26T13:23:38.339316",
   "git": {
-    "commit": "1aa9217ceb33ce8c1b18131818a330322d4316d8",
+    "commit": "054e97bd0ae3db6e9261995f78980a760e2ace68",
     "branch": "main",
     "is_dirty": true,
-    "is_expected_commit": true,
+    "is_expected_commit": false,
     "expected_commit": "1aa9217"
   },
   "hardware": {
@@ -16,7 +16,7 @@
     "gpu_available": false,
     "gpu_count": 0,
     "gpu_devices": [],
-    "available_ram_gb": 1.18,
+    "available_ram_gb": 0.49,
     "torch_version": "2.14.0+cpu",
     "cuda_available": false
   },
@@ -152,28 +152,28 @@
     "status": "success",
     "sample_size": 100,
     "stage_1_normalization": {
-      "runtime_ms": 1.952,
+      "runtime_ms": 2.94,
       "records_processed": 100
     },
     "stage_2_tokenization": {
-      "runtime_ms": 0.286,
+      "runtime_ms": 0.4,
       "total_tokens": 1198
     },
     "stage_3_inverted_index": {
-      "runtime_ms": 0.109,
+      "runtime_ms": 0.165,
       "unique_keys": 225
     },
     "stage_4_candidate_generation": {
-      "runtime_ms": 0.32,
+      "runtime_ms": 0.55,
       "candidate_pairs_found": 486
     },
     "stage_5_feature_extraction": {
-      "runtime_ms": 0.125,
+      "runtime_ms": 0.16,
       "pairs_evaluated": 50
     },
-    "total_cpu_time_ms": 2.792,
+    "total_cpu_time_ms": 4.214,
     "memory_info": {
-      "rss_mb": 197.52
+      "rss_mb": 197.26
     }
   },
   "compute_policy": {

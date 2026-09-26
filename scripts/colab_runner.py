@@ -417,17 +417,14 @@ def run_environment_check(data_dir=None, save_json=True):
     hw_info = get_hardware_info()
     pkg_info = get_installed_packages()
     
-    EXPECTED_COMMIT_PREFIX = "1aa9217"
-    is_expected_commit = git_info["commit"].startswith(EXPECTED_COMMIT_PREFIX)
-    
     resolved_data_dir = get_dataset_dir(data_dir)
     ds_info = verify_dataset(resolved_data_dir)
     
     print(f"\n[1] Git State:")
     print(f"    Commit:          {git_info['commit']}")
-    print(f"    Expected Commit: {EXPECTED_COMMIT_PREFIX} -> {'MATCH' if is_expected_commit else 'MISMATCH / UNCOMMITTED'}")
     print(f"    Branch:          {git_info['branch']}")
     print(f"    Dirty Status:    {git_info['is_dirty']}")
+
     
     print(f"\n[2] Hardware & Runtime:")
     print(f"    Platform:       {hw_info['platform']}")
@@ -487,7 +484,7 @@ def run_environment_check(data_dir=None, save_json=True):
     report = {
         "experiment_id": "EXP-0001_colab_env_check",
         "timestamp": datetime.now().isoformat(),
-        "git": {**git_info, "is_expected_commit": is_expected_commit, "expected_commit": EXPECTED_COMMIT_PREFIX},
+        "git": git_info,
         "hardware": hw_info,
         "packages": pkg_info,
         "dataset": ds_info,

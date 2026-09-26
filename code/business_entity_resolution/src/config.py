@@ -23,9 +23,10 @@ def get_dataset_dir(custom_path=None):
             
     # Candidate search paths
     candidates = [
+        Path("/content/drive/MyDrive/DATASET_ML-AMAZON/dataset"),
         BASE_DIR / "student_resource" / "dataset",
-        Path("/content/student_resource/dataset"),
         Path("/content/dataset"),
+        Path("/content/student_resource/dataset"),
         Path("/content/drive/MyDrive/ML_AMAZON/student_resource/dataset"),
         Path("/content/drive/MyDrive/dataset"),
     ]
@@ -33,6 +34,7 @@ def get_dataset_dir(custom_path=None):
     for cand in candidates:
         if cand.exists() and (cand / "train" / "train_source1.tsv").exists():
             return cand
+
             
     # Fallback default
     return BASE_DIR / "student_resource" / "dataset"
