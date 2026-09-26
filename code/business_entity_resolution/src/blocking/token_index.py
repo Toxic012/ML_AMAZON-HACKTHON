@@ -216,12 +216,24 @@ class InvertedTokenIndex:
                 key=lambda x: self.token_doc_freq.get(x, float('inf'))
             )[:2]
 
-        candidate_scores = {}
+        if not valid_tokens:
+            return []
+            
+        if len(valid_tokens) == 1:
+            return token_map[valid_tokens[0]][:top_k]
+
         t_weights = getattr(self, "token_weights", None)
-        for t in valid_tokens:
+        w0 = t_weights[valid_tokens[0]] if t_weights and valid_tokens[0] in t_weights else (1.0 / (1.0 + 0.1 * max(1, self.token_doc_freq.get(valid_tokens[0], 1))))
+        candidate_scores = dict.fromkeys(token_map[valid_tokens[0]], w0)
+        
+        for t in valid_tokens[1:]:
             w = t_weights[t] if t_weights and t in t_weights else (1.0 / (1.0 + 0.1 * max(1, self.token_doc_freq.get(t, 1))))
-            for eid in token_map[t]:
-                candidate_scores[eid] = candidate_scores.get(eid, 0.0) + w
+            plist = token_map[t]
+            for eid in plist:
+                if eid in candidate_scores:
+                    candidate_scores[eid] += w
+                else:
+                    candidate_scores[eid] = w
 
         if not candidate_scores:
             return []
@@ -257,11 +269,23 @@ class InvertedTokenIndex:
                 key=lambda x: doc_freq_map.get(x, float('inf'))
             )[:4]
             
-        candidate_scores = {}
-        for g in valid_ngrams:
+        if not valid_ngrams:
+            return []
+            
+        if len(valid_ngrams) == 1:
+            return ngram_map[valid_ngrams[0]][:top_k]
+
+        w0 = weights_map[valid_ngrams[0]] if weights_map and valid_ngrams[0] in weights_map else (1.0 / (1.0 + 0.05 * max(1, doc_freq_map.get(valid_ngrams[0], 1))))
+        candidate_scores = dict.fromkeys(ngram_map[valid_ngrams[0]], w0)
+        
+        for g in valid_ngrams[1:]:
             w = weights_map[g] if weights_map and g in weights_map else (1.0 / (1.0 + 0.05 * max(1, doc_freq_map.get(g, 1))))
-            for eid in ngram_map[g]:
-                candidate_scores[eid] = candidate_scores.get(eid, 0.0) + w
+            plist = ngram_map[g]
+            for eid in plist:
+                if eid in candidate_scores:
+                    candidate_scores[eid] += w
+                else:
+                    candidate_scores[eid] = w
                 
         if not candidate_scores:
             return []
@@ -280,27 +304,40 @@ class InvertedTokenIndex:
         c = country.strip().upper() if country else ""
         addr_map = self.country_addr_index.get(c) if c in self.country_addr_index else self.global_addr_index
         
+        valid_addr_tokens = [
+            at for at in addr_tokens
+            if at in addr_map and self.addr_doc_freq.get(at, 0) <= self.max_token_freq and at not in ADDRESS_STOPWORDS
+        ]
+        active_postal = [pt for pt in postal_tokens if pt in addr_map]
+        
+        if len(active_postal) == 0 and len(valid_addr_tokens) == 1:
+            return addr_map[valid_addr_tokens[0]][:top_k]
+        if len(active_postal) == 1 and len(valid_addr_tokens) == 0:
+            return addr_map[active_postal[0]][:top_k]
+            
         candidate_scores = {}
         p_weights = getattr(self, "postal_weights", None)
         a_weights = getattr(self, "addr_weights", None)
         
         # High weight for postal codes (e.g. 3.0 per matching postal code)
-        for pt in postal_tokens:
-            if pt in addr_map:
-                w = p_weights[pt] if p_weights and pt in p_weights else (3.0 / (1.0 + 0.05 * max(1, self.addr_doc_freq.get(pt, 1))))
-                for eid in addr_map[pt]:
-                    candidate_scores[eid] = candidate_scores.get(eid, 0.0) + w
+        for pt in active_postal:
+            w = p_weights[pt] if p_weights and pt in p_weights else (3.0 / (1.0 + 0.05 * max(1, self.addr_doc_freq.get(pt, 1))))
+            plist = addr_map[pt]
+            for eid in plist:
+                if eid in candidate_scores:
+                    candidate_scores[eid] += w
+                else:
+                    candidate_scores[eid] = w
                     
         # Weight for general address tokens
-        valid_addr_tokens = [
-            at for at in addr_tokens
-            if at in addr_map and self.addr_doc_freq.get(at, 0) <= self.max_token_freq and at not in ADDRESS_STOPWORDS
-        ]
-        
         for at in valid_addr_tokens:
             w = a_weights[at] if a_weights and at in a_weights else (1.0 / (1.0 + 0.1 * max(1, self.addr_doc_freq.get(at, 1))))
-            for eid in addr_map[at]:
-                candidate_scores[eid] = candidate_scores.get(eid, 0.0) + w
+            plist = addr_map[at]
+            for eid in plist:
+                if eid in candidate_scores:
+                    candidate_scores[eid] += w
+                else:
+                    candidate_scores[eid] = w
                 
         if not candidate_scores:
             return []

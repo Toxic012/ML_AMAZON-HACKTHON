@@ -146,6 +146,8 @@ def run_profiling(
     t_all_start = time.time()
     last_log_time = time.time()
     
+    global_cand_cache = {}
+    
     for i in range(0, len(s1_records), batch_size):
         batch_s1 = s1_records[i:i+batch_size]
         batch_tiers = []
@@ -203,7 +205,10 @@ def run_profiling(
         
         # Sub-component 7: Candidate Preprocessing & Cache
         t_c0 = time.perf_counter()
-        cand_cache = {cid: PreprocessedCandidate(s2_store[cid], cid) for cid in batch_unique_cids}
+        for cid in batch_unique_cids:
+            if cid not in global_cand_cache:
+                global_cand_cache[cid] = PreprocessedCandidate(s2_store[cid], cid)
+        cand_cache = global_cand_cache
         t_c1 = time.perf_counter()
         t_cand_cache += (t_c1 - t_c0)
         

@@ -1,0 +1,57 @@
+{
+  "experiment_id": "EXP-0004",
+  "experiment_name": "Full-Scale Inverted Index & Query Pipeline Optimization",
+  "dataset": {
+    "s2_index_records": 4887273,
+    "s3_index_records": 5082316,
+    "s1_profiling_queries": 2000,
+    "total_s1_test_queries": 1732544
+  },
+  "baseline_metrics_fullscale_2k_s1": {
+    "total_runtime_seconds": 195.52,
+    "throughput_s1_per_sec": 10.23,
+    "peak_rss_mb": 8267.0,
+    "candidate_pairs_scored": 327928,
+    "matches_tau_083": 9145,
+    "stage_breakdown_seconds": {
+      "candidate_retrieval_total": 109.207,
+      "exact_lookup": 0.022,
+      "word_token_index": 19.050,
+      "char4_index": 15.412,
+      "char3_index": 66.208,
+      "address_postal_index": 8.515,
+      "strategy_e_tier_dedup": 0.489,
+      "candidate_preprocessing_cache": 68.294,
+      "pairwise_feature_extraction": 11.720,
+      "lightgbm_scoring": 5.287,
+      "tsv_serialization": 0.515
+    },
+    "stage_breakdown_percentage": {
+      "candidate_retrieval_total": 55.8,
+      "char3_index": 33.9,
+      "candidate_preprocessing_cache": 34.9,
+      "pairwise_feature_extraction": 6.0,
+      "lightgbm_scoring": 2.7
+    }
+  },
+  "root_causes_diagnosed": {
+    "char3_index": "At 4.887M scale, document frequencies for common character 3-grams exceed 5,000, triggering fallback retrieval of top-4 rarest 3-grams whose combined posting lists contain 50,000+ candidate IDs. In Python, evaluating 50k candidate ID additions in dictionary hashes per query caused 100M+ interpreter dict operations and 2,000 full TimSorts on 50k-element arrays.",
+    "candidate_preprocessing": "PreprocessedCandidate constructor was repeatedly calling normalize_text (regex substitutions) on already-normalized candidate strings and discarding representations at batch boundaries, causing ~250,000 object allocations and 800,000 regex evaluations per batch."
+  },
+  "optimizations_applied": [
+    "Single-posting list fast path (O(1) direct slice without dict creation or sort)",
+    "C-speed dict.fromkeys initialization for multi-list scoring",
+    "Zero-regex fast PreprocessedCandidate constructor on pre-normalized strings",
+    "Global persistent candidate cache across S1 streaming lifecycle"
+  ],
+  "exact_equivalence_verification": {
+    "s1_queries": 2000,
+    "target_slice": "50k S2 / 50k S3",
+    "candidate_set_equality_pct": 100.0,
+    "candidate_jaccard_pct": 100.0,
+    "candidate_overlap_pct": 100.0,
+    "match_decision_equality_pct": 100.0,
+    "changed_s1_decisions": 0,
+    "official_validator": "PASSED"
+  }
+}

@@ -117,10 +117,22 @@ class PreprocessedCandidate:
         self.country = c_country
         self.cid = cand_id
         
-        self.name_tokens = tokenize(c_name)
-        self.char_3grams = char_ngrams(c_name, n=3)
-        self.char_4grams = char_ngrams(c_name, n=4)
-        self.addr_tokens = tokenize(c_addr)
+        name_toks = c_name.split()
+        self.name_tokens = set(name_toks)
+        
+        clean_name = "".join(name_toks)
+        len_cn = len(clean_name)
+        if len_cn <= 3:
+            self.char_3grams = {clean_name} if clean_name else set()
+        else:
+            self.char_3grams = {clean_name[i:i+3] for i in range(len_cn - 2)}
+            
+        if len_cn <= 4:
+            self.char_4grams = {clean_name} if clean_name else set()
+        else:
+            self.char_4grams = {clean_name[i:i+4] for i in range(len_cn - 3)}
+            
+        self.addr_tokens = set(c_addr.split())
         self.postal_tokens = extract_postal_tokens(c_addr)
         self.comb_tokens = self.name_tokens | self.addr_tokens
         self.len_name = len(c_name)

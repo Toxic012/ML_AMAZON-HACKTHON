@@ -214,6 +214,8 @@ def process_single_source_phase(
     
     print(f"\n  [2] Streaming S1 Queries against {source_label.upper()} (Extracting Strategy E representation tiers, Top-K = {top_k_source})...")
     
+    global_cand_cache = {}
+    
     try:
         with open(s1_file, "r", encoding="utf-8") as f_in:
             reader = csv.DictReader(f_in, delimiter="\t")
@@ -233,7 +235,8 @@ def process_single_source_phase(
                         matcher,
                         threshold,
                         top_k_source,
-                        tier_writer
+                        tier_writer,
+                        global_cand_cache=global_cand_cache
                     )
                     total_candidates += c_cnt
                     total_matches += m_cnt
@@ -269,7 +272,8 @@ def process_single_source_phase(
                     matcher,
                     threshold,
                     top_k_source,
-                    tier_writer
+                    tier_writer,
+                    global_cand_cache=global_cand_cache
                 )
                 total_candidates += c_cnt
                 total_matches += m_cnt
@@ -299,6 +303,7 @@ def process_single_source_phase(
     print(f"\n  [3] Freeing {source_label.upper()} Index and Target Store from RAM (Current RSS: {peak_rss:.1f} MB)...")
     del target_index
     del target_store
+    del global_cand_cache
     gc.collect()
     
     post_cleanup_rss = get_process_memory_mb()
@@ -316,7 +321,8 @@ def _process_source_batch_exact(
     matcher: EntityMatcher,
     threshold: float,
     top_k_source: int,
-    tier_writer
+    tier_writer,
+    global_cand_cache: Optional[Dict[str, PreprocessedCandidate]] = None
 ) -> Tuple[int, int]:
     """Extracts 5 representation tiers and pre-scores candidates for an S1 batch."""
     total_cands = 0
@@ -342,7 +348,13 @@ def _process_source_batch_exact(
         batch_tiers.append((s1_rec["entity_id"], s1_rec, exact, toks, g4, g3, addr, unique_cands))
         
     # Pre-cache unique candidate representations for the batch
-    cand_cache = {cid: PreprocessedCandidate(target_store[cid], cid) for cid in batch_unique_cids}
+    if global_cand_cache is None:
+        cand_cache = {cid: PreprocessedCandidate(target_store[cid], cid) for cid in batch_unique_cids}
+    else:
+        for cid in batch_unique_cids:
+            if cid not in global_cand_cache:
+                global_cand_cache[cid] = PreprocessedCandidate(target_store[cid], cid)
+        cand_cache = global_cand_cache
     
     all_features = []
     s1_cand_ranges = []
